@@ -17,8 +17,8 @@ if (!TMDB_API_KEY || !BITMAGNET_GRAPHQL_URL) {
 
 const builder = new addonBuilder({
     id: 'com.stremio.fusion',
-    version: '1.0.0',
-    name: 'Fusion',
+    version: '1.0.1',
+    name: 'Bitmagnet - Debrid - Streams',
     description: 'Advanced addon using Bitmagnet and Real-Debrid with smart filtering and sorting.',
     resources: ['stream'],
     types: ['movie', 'series'],

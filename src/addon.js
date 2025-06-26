@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const { addonBuilder } = require('stremio-addon-sdk');
 const path = require('path');
+const cors = require('cors'); // <-- 1. IMPORT CORS
 const metadata = require('./metadata');
 const bitmagnet = require('./bitmagnet');
 const parser =require('./parser');
@@ -14,7 +15,6 @@ if (!TMDB_API_KEY || !BITMAGNET_GRAPHQL_URL) {
     process.exit(1);
 }
 
-// 1. Initialize Addon Builder
 const builder = new addonBuilder({
     id: 'com.stremio.fusion',
     version: '1.0.0',
@@ -29,7 +29,6 @@ const builder = new addonBuilder({
     }
 });
 
-// --- Sorting and Scoring Logic ---
 const QUALITY_ORDER = ['4k', '2160p', '1440p', '1080p', '720p', '480p'];
 
 function getQualityScore(resolution) {
@@ -69,11 +68,8 @@ function sortStreams(streamCandidates, config) {
     return streamCandidates;
 }
 
-
-// 2. *** FIX: Register the stream handler correctly with the SDK builder ***
 builder.defineStreamHandler(async ({ type, id, config }) => {
     console.log(`Request for streams: ${type} ${id}`);
-    
     try {
         const [imdbId, season, episode] = id.split(':');
         const meta = await metadata.getMetadata(imdbId, TMDB_API_KEY);
@@ -139,10 +135,10 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
     }
 });
 
-
-// 3. Create the Express App and get the addon interface AFTER defining the handler
 const addonInterface = builder.getInterface();
 const app = express();
+
+app.use(cors()); // <-- 2. ENABLE CORS FOR ALL ROUTES
 app.use(express.static(path.join(__dirname, '../public')));
 
 const manifestHandler = (req, res) => {
@@ -161,7 +157,6 @@ const streamHandler = async (req, res) => {
         try { config = JSON.parse(decodeURIComponent(userConfig)); } catch (e) { /* ignore */ }
     }
     try {
-        // *** FIX: Call the registered handler using the SDK's invoker ***
         const response = await addonInterface.get('stream', type, id, config);
         res.setHeader('Content-Type', 'application/json');
         res.send(response);
@@ -171,14 +166,12 @@ const streamHandler = async (req, res) => {
     }
 };
 
-// Define explicit routes
 app.get('/manifest.json', manifestHandler);
 app.get('/:userConfig/manifest.json', manifestHandler);
 
 app.get('/stream/:type/:id.json', streamHandler);
 app.get('/stream/:type/:id/:userConfig.json', streamHandler);
 
-// 4. Start the server
 app.listen(PORT, () => {
     console.log(`Stremio Fusion Addon running on http://127.0.0.1:${PORT}`);
     console.log('Open the above address in your browser to configure and install.');

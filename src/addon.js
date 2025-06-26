@@ -29,7 +29,7 @@ const builder = new addonBuilder({
     }
 });
 
-// --- Sorting and Scoring Logic (unchanged) ---
+// --- Sorting and Scoring Logic ---
 const QUALITY_ORDER = ['4k', '2160p', '1440p', '1080p', '720p', '480p'];
 
 function getQualityScore(resolution) {
@@ -59,7 +59,7 @@ function sortStreams(streamCandidates, config) {
             if (priority === 'seeders') {
                 const seedersA = a.torrent.seeders || 0;
                 const seedersB = b.torrent.seeders || 0;
-                if (seedersA !== seedersB) return seedersB - a.torrent.seeders;
+                if (seedersA !== seedersB) return seedersB - seedersA;
             }
             if (priority === 'fuzzyScore') {
                  if (a.fuzzyScore !== b.fuzzyScore) return b.fuzzyScore - a.fuzzyScore;
@@ -67,117 +67,113 @@ function sortStreams(streamCandidates, config) {
         }
         return 0;
     });
-
     return streamCandidates;
 }
 
-
-// 2. Define the Stream Handler Logic
-builder.defineStreamHandler(async ({ type, id, config }) => {
-    console.log(`Request for streams: ${type} ${id}`);
-    const [imdbId, season, episode] = id.split(':');
-
-    const meta = await metadata.getMetadata(imdbId, TMDB_API_KEY);
-    if (!meta) return { streams: [] };
-
-    const searchParams = { ...meta, type, season, episode };
-    const torrents = await bitmagnet.searchContent(searchParams, config, BITMAGNET_GRAPHQL_URL);
-    if (!torrents || torrents.length === 0) return { streams: [] };
-
-    let streamCandidates = torrents.map(torrent => ({
-        torrent,
-        parsed: parser.parse(torrent.title),
-        fuzzyScore: parser.getFuzzyScore(parser.parse(torrent.title).title, meta.title),
-        rdCached: false,
-    }));
-
-    let rdClient;
-    if (config && config.rdKey) {
-        try {
-            rdClient = new RealDebridClient(config.rdKey);
-            const infoHashes = streamCandidates.map(c => c.torrent.infoHash);
-            const rdCache = await rdClient.checkCache(infoHashes);
-            streamCandidates.forEach(c => {
-                if (rdCache[c.torrent.infoHash] && Object.keys(rdCache[c.torrent.infoHash].rd).length > 0) {
-                    c.rdCached = true;
-                }
-            });
-        } catch (e) {
-            console.warn('Real-Debrid check failed:', e.message);
-        }
-    }
-    
-    streamCandidates.sort((a, b) => b.rdCached - a.rdCached);
-    const sortedCandidates = sortStreams(streamCandidates, config);
-
-    const streams = [];
-    for (const candidate of sortedCandidates) {
-        const { torrent, parsed, rdCached } = candidate;
-        const largestFile = torrent.files.sort((a, b) => b.size - a.size)[0];
-        const fileIdx = torrent.files.indexOf(largestFile);
-        const streamTitle = `${torrent.title}\n💾 ${Math.round(torrent.size / 1e9)} GB | 👤 ${torrent.seeders || 0}`;
-
-        if (rdCached && rdClient) {
-            try {
-                const addedMagnet = await rdClient.addMagnet(torrent.infoHash);
-                if (addedMagnet.id) {
-                    const torrentInfo = await rdClient.getTorrentInfo(addedMagnet.id);
-                    const fileToUnrestrict = torrentInfo.files.find(f => f.path === largestFile.path);
-                    if (fileToUnrestrict) {
-                         const unrestricted = await rdClient.unrestrictLink(fileToUnrestrict.link);
-                         if (unrestricted.download) {
-                             streams.push({ name: '[RD+ Cached]', title: streamTitle, url: unrestricted.download });
-                             continue;
-                         }
-                    }
-                }
-            } catch(e) { console.error(`Failed to get RD link for ${torrent.infoHash}`, e.message) }
-        }
-
-        streams.push({ name: rdCached ? '[RD-Cached]' : '[Torrent]', title: streamTitle, infoHash: torrent.infoHash, fileIdx });
-    }
-
-    return { streams: streams.slice(0, 50) };
-});
-
-// 3. Create the Express App and integrate the addon
-const app = express();
-const addonInterface = builder.getInterface();
-
-// Serve static files from 'public' directory
-app.use(express.static(path.join(__dirname, '../public')));
-
-// Manually handle the manifest route
-app.get('/:userConfig?/manifest.json', (req, res) => {
+// 2. Define the Stream Handler Logic (reusable function)
+const streamHandler = async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    const manifest = { ...addonInterface.manifest };
-    // If a config is present in the URL, add it to the manifest links
-    if (req.params.userConfig) {
-        manifest.behaviorHints.configurationRequired = true; // Tell Stremio the config is set
-    }
-    res.send(manifest);
-});
+    const { type, id, userConfig } = req.params;
 
-// Manually handle the stream routes
-app.get('/stream/:type/:id/:userConfig?.json', async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
     let config = {};
-    if (req.params.userConfig) {
+    if (userConfig) {
         try {
-            config = JSON.parse(decodeURIComponent(req.params.userConfig));
+            config = JSON.parse(decodeURIComponent(userConfig));
         } catch (e) {
             console.error("Failed to parse user config:", e);
         }
     }
-    
+
     try {
-        const response = await addonInterface.get('stream', req.params.type, req.params.id, config);
-        res.send(response);
-    } catch(err) {
+        console.log(`Request for streams: ${type} ${id}`);
+        const [imdbId, season, episode] = id.split(':');
+
+        const meta = await metadata.getMetadata(imdbId, TMDB_API_KEY);
+        if (!meta) return res.send({ streams: [] });
+
+        const searchParams = { ...meta, type, season, episode };
+        const torrents = await bitmagnet.searchContent(searchParams, config, BITMAGNET_GRAPHQL_URL);
+        if (!torrents || torrents.length === 0) return res.send({ streams: [] });
+
+        let streamCandidates = torrents.map(torrent => ({
+            torrent,
+            parsed: parser.parse(torrent.title),
+            fuzzyScore: parser.getFuzzyScore(parser.parse(torrent.title).title, meta.title),
+            rdCached: false,
+        }));
+
+        let rdClient;
+        if (config && config.rdKey) {
+            try {
+                rdClient = new RealDebridClient(config.rdKey);
+                const infoHashes = streamCandidates.map(c => c.torrent.infoHash);
+                const rdCache = await rdClient.checkCache(infoHashes);
+                streamCandidates.forEach(c => {
+                    if (rdCache[c.torrent.infoHash] && Object.keys(rdCache[c.torrent.infoHash].rd).length > 0) {
+                        c.rdCached = true;
+                    }
+                });
+            } catch (e) { console.warn('Real-Debrid check failed:', e.message); }
+        }
+
+        streamCandidates.sort((a, b) => b.rdCached - a.rdCached);
+        const sortedCandidates = sortStreams(streamCandidates, config);
+
+        const streams = [];
+        for (const candidate of sortedCandidates) {
+            const { torrent, rdCached } = candidate;
+            const largestFile = torrent.files.sort((a, b) => b.size - a.size)[0];
+            const fileIdx = torrent.files.indexOf(largestFile);
+            const streamTitle = `${torrent.title}\n💾 ${Math.round(torrent.size / 1e9)} GB | 👤 ${torrent.seeders || 0}`;
+
+            if (rdCached && rdClient) {
+                try {
+                    const addedMagnet = await rdClient.addMagnet(torrent.infoHash);
+                    if (addedMagnet.id) {
+                        const torrentInfo = await rdClient.getTorrentInfo(addedMagnet.id);
+                        const fileToUnrestrict = torrentInfo.files.find(f => f.path === largestFile.path);
+                        if (fileToUnrestrict) {
+                            const unrestricted = await rdClient.unrestrictLink(fileToUnrestrict.link);
+                            if (unrestricted.download) {
+                                streams.push({ name: '[RD+ Cached]', title: streamTitle, url: unrestricted.download });
+                                continue;
+                            }
+                        }
+                    }
+                } catch (e) { console.error(`Failed to get RD link for ${torrent.infoHash}`, e.message) }
+            }
+            streams.push({ name: rdCached ? '[RD-Cached]' : '[Torrent]', title: streamTitle, infoHash: torrent.infoHash, fileIdx });
+        }
+        res.send({ streams: streams.slice(0, 50) });
+
+    } catch (err) {
         console.error("Error in stream handler:", err);
         res.status(500).send({ err: "handler error" });
     }
-});
+};
+
+// 3. Create the Express App and define explicit routes
+const app = express();
+app.use(express.static(path.join(__dirname, '../public')));
+
+// Manifest handler
+const manifestHandler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const manifest = builder.getInterface().manifest;
+    // If a config is present in the URL, tell Stremio the config is set
+    if (req.params.userConfig) {
+        manifest.behaviorHints.configurationRequired = true;
+    }
+    res.send(manifest);
+};
+
+// --- FIX: Define explicit, non-ambiguous routes ---
+app.get('/manifest.json', manifestHandler);
+app.get('/:userConfig/manifest.json', manifestHandler);
+
+app.get('/stream/:type/:id.json', streamHandler);
+app.get('/stream/:type/:id/:userConfig.json', streamHandler);
+
 
 // 4. Start the server
 app.listen(PORT, () => {

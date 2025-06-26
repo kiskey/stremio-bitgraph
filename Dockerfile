@@ -23,8 +23,6 @@ EXPOSE 7000
 
 # Set default environment variables (can be overridden)
 ENV PORT=7000
-ENV TMDB_API_KEY=""
-ENV BITMAGNET_GRAPHQL_URL=""
 
 # Start the application
 CMD [ "node", "src/addon.js" ]

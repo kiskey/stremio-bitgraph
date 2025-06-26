@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
+const { addonBuilder } = require('stremio-addon-sdk');
 const path = require('path');
 const metadata = require('./metadata');
 const bitmagnet = require('./bitmagnet');
@@ -10,12 +10,11 @@ const RealDebridClient = require('./realdebrid');
 const { PORT, TMDB_API_KEY, BITMAGNET_GRAPHQL_URL } = process.env;
 
 if (!TMDB_API_KEY || !BITMAGNET_GRAPHQL_URL) {
-    throw new Error('Missing required environment variables (TMDB_API_KEY, BITMAGNET_GRAPHQL_URL)');
+    console.error('FATAL: Missing required environment variables (TMDB_API_KEY, BITMAGNET_GRAPHQL_URL)');
+    process.exit(1);
 }
 
-const app = express();
-app.use(express.static(path.join(__dirname, '../public')));
-
+// 1. Initialize Addon Builder
 const builder = new addonBuilder({
     id: 'com.stremio.fusion',
     version: '1.0.0',
@@ -30,6 +29,7 @@ const builder = new addonBuilder({
     }
 });
 
+// --- Sorting and Scoring Logic (unchanged) ---
 const QUALITY_ORDER = ['4k', '2160p', '1440p', '1080p', '720p', '480p'];
 
 function getQualityScore(resolution) {
@@ -59,7 +59,7 @@ function sortStreams(streamCandidates, config) {
             if (priority === 'seeders') {
                 const seedersA = a.torrent.seeders || 0;
                 const seedersB = b.torrent.seeders || 0;
-                if (seedersA !== seedersB) return seedersB - seedersA;
+                if (seedersA !== seedersB) return seedersB - a.torrent.seeders;
             }
             if (priority === 'fuzzyScore') {
                  if (a.fuzzyScore !== b.fuzzyScore) return b.fuzzyScore - a.fuzzyScore;
@@ -72,21 +72,17 @@ function sortStreams(streamCandidates, config) {
 }
 
 
+// 2. Define the Stream Handler Logic
 builder.defineStreamHandler(async ({ type, id, config }) => {
-    console.log(`Request for streams: ${type} ${id} with config:`, config);
+    console.log(`Request for streams: ${type} ${id}`);
     const [imdbId, season, episode] = id.split(':');
 
     const meta = await metadata.getMetadata(imdbId, TMDB_API_KEY);
-    if (!meta) {
-        return { streams: [] };
-    }
+    if (!meta) return { streams: [] };
 
     const searchParams = { ...meta, type, season, episode };
     const torrents = await bitmagnet.searchContent(searchParams, config, BITMAGNET_GRAPHQL_URL);
-
-    if (!torrents || torrents.length === 0) {
-        return { streams: [] };
-    }
+    if (!torrents || torrents.length === 0) return { streams: [] };
 
     let streamCandidates = torrents.map(torrent => ({
         torrent,
@@ -111,23 +107,18 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
         }
     }
     
-    // Prioritize RD cached streams before sorting
     streamCandidates.sort((a, b) => b.rdCached - a.rdCached);
-
-    // Now apply user's detailed sorting logic
     const sortedCandidates = sortStreams(streamCandidates, config);
 
     const streams = [];
     for (const candidate of sortedCandidates) {
         const { torrent, parsed, rdCached } = candidate;
-
         const largestFile = torrent.files.sort((a, b) => b.size - a.size)[0];
         const fileIdx = torrent.files.indexOf(largestFile);
         const streamTitle = `${torrent.title}\n💾 ${Math.round(torrent.size / 1e9)} GB | 👤 ${torrent.seeders || 0}`;
 
         if (rdCached && rdClient) {
             try {
-                // To get a link, we must add the magnet, get the torrent info, then unrestrict the file link
                 const addedMagnet = await rdClient.addMagnet(torrent.infoHash);
                 if (addedMagnet.id) {
                     const torrentInfo = await rdClient.getTorrentInfo(addedMagnet.id);
@@ -135,37 +126,61 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
                     if (fileToUnrestrict) {
                          const unrestricted = await rdClient.unrestrictLink(fileToUnrestrict.link);
                          if (unrestricted.download) {
-                             streams.push({
-                                name: '[RD+ Cached]',
-                                title: streamTitle,
-                                url: unrestricted.download,
-                             });
-                             continue; // Skip to next candidate
+                             streams.push({ name: '[RD+ Cached]', title: streamTitle, url: unrestricted.download });
+                             continue;
                          }
                     }
                 }
-            } catch(e) {
-                console.error(`Failed to get RD link for ${torrent.infoHash}`, e.message)
-            }
+            } catch(e) { console.error(`Failed to get RD link for ${torrent.infoHash}`, e.message) }
         }
 
-        // Fallback to P2P stream
-        streams.push({
-            name: rdCached ? '[RD-Cached]' : '[Torrent]',
-            title: streamTitle,
-            infoHash: torrent.infoHash,
-            fileIdx,
-        });
+        streams.push({ name: rdCached ? '[RD-Cached]' : '[Torrent]', title: streamTitle, infoHash: torrent.infoHash, fileIdx });
     }
 
-    return { streams: streams.slice(0, 50) }; // Limit to a reasonable number
+    return { streams: streams.slice(0, 50) };
 });
 
+// 3. Create the Express App and integrate the addon
+const app = express();
+const addonInterface = builder.getInterface();
 
-const { "middleware": addonInterface } = builder.getInterface();
-app.use(addonInterface);
+// Serve static files from 'public' directory
+app.use(express.static(path.join(__dirname, '../public')));
 
+// Manually handle the manifest route
+app.get('/:userConfig?/manifest.json', (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const manifest = { ...addonInterface.manifest };
+    // If a config is present in the URL, add it to the manifest links
+    if (req.params.userConfig) {
+        manifest.behaviorHints.configurationRequired = true; // Tell Stremio the config is set
+    }
+    res.send(manifest);
+});
+
+// Manually handle the stream routes
+app.get('/stream/:type/:id/:userConfig?.json', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    let config = {};
+    if (req.params.userConfig) {
+        try {
+            config = JSON.parse(decodeURIComponent(req.params.userConfig));
+        } catch (e) {
+            console.error("Failed to parse user config:", e);
+        }
+    }
+    
+    try {
+        const response = await addonInterface.get('stream', req.params.type, req.params.id, config);
+        res.send(response);
+    } catch(err) {
+        console.error("Error in stream handler:", err);
+        res.status(500).send({ err: "handler error" });
+    }
+});
+
+// 4. Start the server
 app.listen(PORT, () => {
     console.log(`Stremio Fusion Addon running on http://127.0.0.1:${PORT}`);
-    console.log('Ensure TMDB_API_KEY and BITMAGNET_GRAPHQL_URL are set in your .env file.');
+    console.log('Open the above address in your browser to configure and install.');
 });

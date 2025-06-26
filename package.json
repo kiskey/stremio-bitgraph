@@ -1,0 +1,20 @@
+{
+  "name": "stremio-fusion-addon",
+  "version": "1.0.0",
+  "description": "Advanced Stremio addon using Bitmagnet and Real-Debrid",
+  "main": "src/addon.js",
+  "scripts": {
+    "start": "node src/addon.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.6.0",
+    "express": "^5.1.0",
+    "graphql-request": "^7.2.0",
+    "node-fetch": "^2.7.0",
+    "parse-torrent-title": "^1.4.0",
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}

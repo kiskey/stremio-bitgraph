@@ -4,7 +4,7 @@ const { addonBuilder } = require('stremio-addon-sdk');
 const path = require('path');
 const metadata = require('./metadata');
 const bitmagnet = require('./bitmagnet');
-const parser = require('./parser');
+const parser =require('./parser');
 const RealDebridClient = require('./realdebrid');
 
 const { PORT, TMDB_API_KEY, BITMAGNET_GRAPHQL_URL } = process.env;
@@ -41,7 +41,6 @@ function getQualityScore(resolution) {
 
 function sortStreams(streamCandidates, config) {
     const priorities = config.sortOrder || ['language', 'quality', 'seeders'];
-
     streamCandidates.sort((a, b) => {
         for (const priority of priorities) {
             if (priority === 'language') {
@@ -62,7 +61,7 @@ function sortStreams(streamCandidates, config) {
                 if (seedersA !== seedersB) return seedersB - seedersA;
             }
             if (priority === 'fuzzyScore') {
-                 if (a.fuzzyScore !== b.fuzzyScore) return b.fuzzyScore - a.fuzzyScore;
+                if (a.fuzzyScore !== b.fuzzyScore) return b.fuzzyScore - a.fuzzyScore;
             }
         }
         return 0;
@@ -70,30 +69,19 @@ function sortStreams(streamCandidates, config) {
     return streamCandidates;
 }
 
-// 2. Define the Stream Handler Logic (reusable function)
-const streamHandler = async (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    const { type, id, userConfig } = req.params;
 
-    let config = {};
-    if (userConfig) {
-        try {
-            config = JSON.parse(decodeURIComponent(userConfig));
-        } catch (e) {
-            console.error("Failed to parse user config:", e);
-        }
-    }
-
+// 2. *** FIX: Register the stream handler correctly with the SDK builder ***
+builder.defineStreamHandler(async ({ type, id, config }) => {
+    console.log(`Request for streams: ${type} ${id}`);
+    
     try {
-        console.log(`Request for streams: ${type} ${id}`);
         const [imdbId, season, episode] = id.split(':');
-
         const meta = await metadata.getMetadata(imdbId, TMDB_API_KEY);
-        if (!meta) return res.send({ streams: [] });
+        if (!meta) return { streams: [] };
 
         const searchParams = { ...meta, type, season, episode };
         const torrents = await bitmagnet.searchContent(searchParams, config, BITMAGNET_GRAPHQL_URL);
-        if (!torrents || torrents.length === 0) return res.send({ streams: [] });
+        if (!torrents || torrents.length === 0) return { streams: [] };
 
         let streamCandidates = torrents.map(torrent => ({
             torrent,
@@ -144,36 +132,51 @@ const streamHandler = async (req, res) => {
             }
             streams.push({ name: rdCached ? '[RD-Cached]' : '[Torrent]', title: streamTitle, infoHash: torrent.infoHash, fileIdx });
         }
-        res.send({ streams: streams.slice(0, 50) });
-
+        return { streams: streams.slice(0, 50) };
     } catch (err) {
         console.error("Error in stream handler:", err);
-        res.status(500).send({ err: "handler error" });
+        return Promise.reject("Handler error");
     }
-};
+});
 
-// 3. Create the Express App and define explicit routes
+
+// 3. Create the Express App and get the addon interface AFTER defining the handler
+const addonInterface = builder.getInterface();
 const app = express();
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Manifest handler
 const manifestHandler = (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    const manifest = builder.getInterface().manifest;
-    // If a config is present in the URL, tell Stremio the config is set
+    const manifest = { ...addonInterface.manifest };
     if (req.params.userConfig) {
         manifest.behaviorHints.configurationRequired = true;
     }
     res.send(manifest);
 };
 
-// --- FIX: Define explicit, non-ambiguous routes ---
+const streamHandler = async (req, res) => {
+    const { type, id, userConfig } = req.params;
+    let config = {};
+    if (userConfig) {
+        try { config = JSON.parse(decodeURIComponent(userConfig)); } catch (e) { /* ignore */ }
+    }
+    try {
+        // *** FIX: Call the registered handler using the SDK's invoker ***
+        const response = await addonInterface.get('stream', type, id, config);
+        res.setHeader('Content-Type', 'application/json');
+        res.send(response);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send({ err: "handler error" });
+    }
+};
+
+// Define explicit routes
 app.get('/manifest.json', manifestHandler);
 app.get('/:userConfig/manifest.json', manifestHandler);
 
 app.get('/stream/:type/:id.json', streamHandler);
 app.get('/stream/:type/:id/:userConfig.json', streamHandler);
-
 
 // 4. Start the server
 app.listen(PORT, () => {

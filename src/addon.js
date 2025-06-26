@@ -24,7 +24,7 @@ const builder = new addonBuilder({
     types: ['movie', 'series'],
     catalogs: [],
     behaviorHints: {
-        configurable: true,
+        configurable: false,
         configurationRequired: false,
     }
 });

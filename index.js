@@ -229,10 +229,8 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
     // Consolidate parameters into a single ID string for the realdebrid_proxy resource.
     const customResourceId = `${selectedTorrentInfoHash}_${matchedFileIndex || '0'}_${tmdbShowDetails.id}_${seasonNumber}_${episodeNumber}`;
-    // Construct the URL to our custom stream proxy endpoint
-    // The client (Stremio) will hit this URL, and our addon will then handle Real-Debrid interaction
-    // Pass realDebridApiKey as a query parameter for the proxy to use
-    const streamUrl = `/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
+    // Construct the FULLY QUALIFIED URL to our custom stream proxy endpoint
+    const streamUrl = `${config.appHost}/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
 
     const streamMetadata = formatStreamMetadata(
       parsedTorrentInfo, // Use parsed info from matcher

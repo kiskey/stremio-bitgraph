@@ -11,6 +11,7 @@ module.exports = {
   description: 'Streams TV show episodes from Bitmagnet via Real-Debrid with intelligent matching and caching.',
   resources: [
     'stream', // The addon provides streaming links
+    'realdebrid_proxy' // CRITICAL FIX: Added new custom resource for Real-Debrid proxy
     // 'meta', // Can be enabled if you want to provide custom metadata, but Cinemeta is usually sufficient for 'tt' IDs
   ],
   types: ['series'], // The addon provides content for TV series

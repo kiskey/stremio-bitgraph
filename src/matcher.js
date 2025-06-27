@@ -246,61 +246,7 @@ async function findBestTorrentMatch(bitmagnetResults, tmdbEpisodeDetails, tmdbSh
 module.exports = {
   findBestTorrentMatch,
 };
-```
 
-**Reasoning for the Changes:**
-
-The core of the problem was that `scoreTorrent` was receiving a `TorrentContent` object from the `bitmagnetResults` array (which is correct), but then directly trying to access `torrent.name` and `torrent.files`. As seen in your log, the actual torrent's name and files are nested *inside* a `torrent` property of that `TorrentContent` object.
-
-Here's how the `TorrentContent` object looks, simplified:
-
-```json
-{
-  "id": "...",
-  "infoHash": "...", // This is the TorrentContent's infoHash
-  "contentType": "tv_show",
-  "title": "Poker Face (2023) S02E10", // This is TorrentContent.title, not the torrent filename
-  "torrent": { // <--- THIS IS THE NESTED TORRENT OBJECT
-    "infoHash": "...", // This is the actual torrent's infoHash
-    "name": "Poker.Face.2023.S02E10.1080p.x265-ELiTE", // <--- THIS IS THE ACTUAL TORRENT FILENAME
-    "files": [...] // <--- ACTUAL FILES ARE HERE
-  },
-  "content": { // <--- This is the nested content (show) object
-    "title": "Poker Face", // This is the show's title
-    // ...
-  }
-}
-```
-
-The `scoreTorrent` function was updated to correctly retrieve the nested `torrent` object:
-
-* It now accepts `bitmagnetItem` as the parameter name to clarify it's the full item from Bitmagnet search results.
-* `const torrent = bitmagnetItem.torrent;` explicitly pulls out the nested torrent object.
-* `const torrentName = torrent ? torrent.name : null;` then correctly accesses the `name` from this nested object.
-* Similarly, `const torrentFiles = torrent ? torrent.files : null;` correctly accesses the files.
-
-This ensures that `parseTorrentInfo` receives the actual torrent filename string, resolving the "undefined" error.
-
-**Next Steps:**
-
-1.  **Update `src/matcher.js`** with the code provided in this Canvas.
-2.  **Rebuild and run your Docker Compose stack:**
-    ```bash
-    docker compose down
-    docker compose up --build -d
-    ```
-3.  **Monitor the logs:** You should now see actual torrent names being processed, and hopefully, successful stream matching.
-
-This correction directly addresses the data access problem that was causing `parse-torrent-title` to receive `undefined`.I've analyzed the `query_log.txt` and the `src/matcher.js` Canvas. You are correct; the issue with `"Failed to parse torrent filename "undefined": Invalid input."` persists, indicating that the `torrent.name` is still not being correctly passed to `parseTorrentInfo`.
-
-The `query_log.txt` reveals the structure of the `item` objects returned by Bitmagnet: `torrent.name` is nested within a `torrent` object, which is itself a property of the `item`. For example, `{"torrent":{"infoHash":"...","name":"Poker.Face.2023.S02E10.1080p.x265-ELiTE", ...}}`.
-
-In the current `src/matcher.js`, the `scoreTorrent` function receives `torrent` as its parameter. This `torrent` is actually the entire `item` object from Bitmagnet's `items` array. Therefore, when `scoreTorrent` tries to access `torrent.name`, it's looking for a top-level `name` property on the `item` itself, which often holds the general content title (e.g., "Poker Face (2023) S02E10") or is undefined in some cases, leading to the `parseTorrentInfo("undefined")` error. The actual torrent filename is `torrent.torrent.name`.
-
-I will update the `src/matcher.js` Canvas to explicitly access the nested `torrent.torrent.name` and `torrent.torrent.files` properties when passing them to `parseTorrentInfo` and during file-level matching.
-
-
-```javascript
 /**
  * src/matcher.js
  * Intelligent Torrent Matching and Scoring

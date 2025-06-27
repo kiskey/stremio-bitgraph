@@ -209,23 +209,25 @@ const TORRENT_FILES_QUERY = `
 /**
  * Searches for torrents on Bitmagnet.
  * @param {string} searchQuery - The search string (e.g., "Game of Thrones S01E01").
- * @param {number} minSeeders - Minimum seeders to filter results.
+ * NOTE: This parameter will now contain the refined search string (e.g., "Show Title" SXXEXX).
+ * @param {number} minSeeders - Minimum seeders for client-side filtering.
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
-async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferredLanguages from signature here, but passed from index.js
+async function searchTorrents(searchQuery, minSeeders = 1) {
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
     logger.error('Bitmagnet GraphQL endpoint is not configured.');
     return [];
   }
 
-  logger.info(`Searching Bitmagnet for query: "${searchQuery}" with min seeders: ${minSeeders}`);
+  // CRITICAL FIX: Removed mention of min seeders in log, as it's not applied in Bitmagnet query
+  logger.info(`Searching Bitmagnet for query: "${searchQuery}"`);
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
       input: {
         queryString: searchQuery,
-        limit: 50, // CRITICAL FIX: Limit to 50 results as requested
+        limit: 50, // Limit to 50 results as requested
         orderBy: [
           { field: 'seeders', descending: true }, // Order by highest seeders first
           { field: 'published_at', descending: true } // Then by most recent published date
@@ -235,7 +237,6 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
             filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
           }
         }
-        // Language facet filter intentionally removed to handle client-side.
       },
     },
   };
@@ -249,11 +250,10 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
     );
 
     const torrents = response.data.data?.torrentContent?.search?.items || [];
-    logger.info(`Bitmagnet returned ${torrents.length} potential torrents for "${searchQuery}".`); // Changed to info level
+    logger.info(`Bitmagnet returned ${torrents.length} potential torrents for "${searchQuery}".`);
     logger.debug(`Bitmagnet raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
 
-
-    // Client-side filtering for minSeeders (still good practice)
+    // Client-side filtering for minSeeders (still applied here)
     return torrents.filter(torrent => torrent.seeders >= minSeeders);
 
   } catch (error) {

@@ -200,17 +200,29 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   let matchedFilePath = null;
   let finalParsedInfo = parsedTorrent; // This will hold the parsed info of the winning item (torrent or file)
 
-  // Determine if we need to inspect individual files.
-  // We MUST inspect files if:
-  // 1. The torrent name itself is NOT a direct episode match (e.g., it's a season pack).
-  // 2. The title similarity is high enough (>= 0.75) to warrant a deeper look, even if it *is* a direct episode match,
-  //    to ensure we find the *best* file within multi-file torrents.
-  const isTorrentDirectEpisodeMatch = (parsedTorrent.season === targetSeason && parsedTorrent.episode === targetEpisode);
-  const needsFileInspection = !isTorrentDirectEpisodeMatch || titleSimilarity >= 0.75;
+  // Determine if the torrent's main name itself provides a direct match for the target episode
+  const isTorrentNameDirectEpisodeMatch = (parsedTorrent.season === targetSeason && parsedTorrent.episode === targetEpisode);
+
+  // Determine if the torrent name, as parsed by PTT, explicitly lacks season/episode numbers
+  const isTorrentNameMissingSxE = (parsedTorrent.season === undefined || parsedTorrent.season === null) &&
+                                  (parsedTorrent.episode === undefined || parsedTorrent.episode === null);
+
+  // --- Optimized needsFileInspection Logic ---
+  // We need file inspection if:
+  // 1. The torrent name, as parsed by PTT, explicitly lacks season/episode AND has high title similarity (>= 0.75).
+  //    This specifically targets cases like "Revival.2025.S01..." where PTT might only parse "Revival" and miss "S01".
+  // 2. OR, the torrent name is a direct episode match AND has high title similarity (>= 0.75).
+  //    This is to find the best quality/version of a directly named episode from within its files.
+  // 3. OR, the torrent name *is* a general season match (e.g., "Revival.S01") but not a direct episode match,
+  //    AND has high title similarity (>= 0.75). This ensures we check files for the specific episode in season packs.
+  const needsFileInspection =
+    (isTorrentNameMissingSxE && titleSimilarity >= 0.75) || // Condition 1
+    (isTorrentNameDirectEpisodeMatch && titleSimilarity >= 0.75) || // Condition 2
+    ((parsedTorrent.season === targetSeason && !isTorrentNameDirectEpisodeMatch) && titleSimilarity >= 0.75); // Condition 3
 
 
   if (needsFileInspection) {
-    logger.debug(`Torrent is a potential pack or title similarity is high enough (${titleSimilarity.toFixed(2)}). Inspecting individual files for "${torrentName}".`);
+    logger.debug(`File inspection triggered for torrent: "${torrentName}" (Similarity: ${titleSimilarity.toFixed(2)})`);
 
     let filesToProcess = torrent ? torrent.files : null;
     // If files are not embedded in the initial search result, fetch them directly from Bitmagnet.
@@ -232,15 +244,16 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
     if (filesToProcess && filesToProcess.length > 0) {
       let currentBestFileScore = -Infinity; // Keep track of the best file score found within this torrent
       let bestFileParsedInfo = null;
+      let hasFoundMatchingFile = false; // Track if any file matched
 
       for (const file of filesToProcess) {
         const parsedFile = parseTorrentInfo(file.path);
         if (parsedFile) {
-          const isFileEpisodeMatch = isEpisodeMatch(parsedFile, targetSeason, targetEpisode); // Use refined isEpisodeMatch
-          if (isFileEpisodeMatch) {
-            // Score the individual file, boosting it significantly
+          // Use isEpisodeMatch to check if this *file* matches the target episode
+          if (isEpisodeMatch(parsedFile, targetSeason, targetEpisode)) {
+            hasFoundMatchingFile = true;
             const fileTitleForSimilarity = cleanParsedTorrentTitle(parsedFile);
-            const fileScore = 500 + calculateSimilarity(fileTitleForSimilarity, tmdbShowTitle) * 50; // Boost for file title
+            const fileScore = 500 + calculateSimilarity(fileTitleForSimilarity, tmdbShowTitle) * 50;
             
             if (fileScore > currentBestFileScore) {
               currentBestFileScore = fileScore;
@@ -255,29 +268,33 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
         }
       }
 
-      if (bestFileParsedInfo && currentBestFileScore > -Infinity) {
+      if (hasFoundMatchingFile && bestFileParsedInfo && currentBestFileScore > -Infinity) {
           score += currentBestFileScore; // Add the score of the best matched file
-          finalParsedInfo = bestFileParsedInfo; // Use file's parsed info for final output
+          finalParsedInfo = bestFileParsedInfo; // Use the file's parsed info for the final result
           logger.debug(`Final parsed info updated from best matching file.`);
       } else {
           // If it was a pack/potential pack but no specific file matched the episode, penalize.
-          logger.warn(`Torrent was a pack/potential pack, but no specific file for S${targetSeason}E${targetEpisode} found in files: "${torrentName}". Penalizing.`);
+          logger.warn(`File inspection for "${torrentName}" completed, but no specific file for S${targetSeason}E${targetEpisode} found. Penalizing torrent.`);
           return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
       }
     } else {
-        logger.warn(`No files found for torrent "${torrentName}" (InfoHash: ${torrentInfoHash}) that could be processed for file-level matching, and it required file inspection. Penalizing.`);
+        logger.warn(`File inspection was needed for "${torrentName}" but no files were available or processable. Penalizing torrent.`);
         return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
     }
   } else {
-      // If it's a direct single-episode torrent (as per PTT) and does not need file inspection
-      matchedFileIndex = 0; // Assume index 0 for single file torrents if not explicitly found.
-      matchedFilePath = torrentName; // Use torrent name as path if single file
+      // If file inspection was NOT needed:
+      // We must ensure the torrent name itself (parsedTorrent) is a direct episode match.
+      // If it's not a direct episode match, and file inspection was skipped, this torrent is not relevant.
+      if (!isTorrentNameDirectEpisodeMatch) {
+          logger.warn(`Torrent "${torrentName}" not a direct episode match and file inspection was skipped. Penalizing.`);
+          return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
+      }
+      matchedFileIndex = 0; // Assume first file for direct single-episode torrents
+      matchedFilePath = torrentName;
       logger.debug(`Torrent "${torrentName}" is a direct single episode torrent, assuming main file at index 0.`);
-      // Score already includes base 1000 for direct episode match.
   }
 
-  // If after all checks, we still don't have a valid parsedInfo (e.g., if the initial parse failed
-  // and no file-level match saved it), return -Infinity.
+  // Final check: if after all processing, we still don't have valid parsedInfo, something went wrong.
   if (!finalParsedInfo) {
       return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
   }

@@ -4,16 +4,16 @@
  * Initializes the Stremio addon, defines stream handlers, and orchestrates the content delivery.
  */
 
-const { serveHTTP, get } = require('stremio-addon-sdk'); // Corrected package name
-const addonBuilder = require('stremio-addon-sdk'); // Corrected package name
+// Corrected: addonBuilder is likely a named export along with serveHTTP and get
+const { serveHTTP, get, addonBuilder } = require('stremio-addon-sdk'); 
 const manifest = require('./manifest');
 const config = require('./config');
 const { initializePrisma, getPrismaClient } = require('./db');
-const tmdb = require('./src/tmdb'); // Correct path for tmdb
-const bitmagnet = require('./src/bitmagnet'); // Correct path for bitmagnet
-const realDebrid = require('./src/realdebrid'); // Correct path for realdebrid
-const matcher = require('./src/matcher'); // Correct path for matcher
-const { logger } = require('./src/utils'); // Correct path for utils
+const tmdb = require('./src/tmdb');
+const bitmagnet = require('./src/bitmagnet');
+const realDebrid = require('./src/realdebrid');
+const matcher = require('./src/matcher');
+const { logger } = require('./src/utils');
 
 // Initialize Prisma Client on startup
 initializePrisma();
@@ -67,6 +67,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
     // In a real scenario, you'd likely fetch this from a mapping service or a cached entry.
     // For this example, we'll use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
 
+    // Using tmdb.get for a direct URL fetch. This will make an HTTP GET request to the specified URL.
     const tmdbFindResponse = await tmdb.get(`https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&api_key=${config.tmdb.apiKey}`);
     if (tmdbFindResponse && tmdbFindResponse.tv_results && tmdbFindResponse.tv_results.length > 0) {
       tmdbShowDetails = tmdbFindResponse.tv_results[0];

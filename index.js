@@ -5,7 +5,7 @@
  */
 
 const { serveHTTP, get };
-const addonBuilder = require('@stremio/addon-sdk');
+const addonBuilder = require('stremio-addon-sdk');
 const manifest = require('./manifest');
 const config = require('./config');
 const { initializePrisma, getPrismaClient } = require('./db');

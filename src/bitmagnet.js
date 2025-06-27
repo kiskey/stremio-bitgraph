@@ -10,19 +10,7 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
-// Map common language codes to Bitmagnet's Language enum (case-insensitive for input)
-// CRITICAL FIX: Ensure mapping to LOWERCASE enum values as per Bitmagnet's schema (e.g., 'en', 'ta')
-const BITMAGNET_LANGUAGE_MAP = {
-  'en': 'en', 'eng': 'en',
-  'fr': 'fr', 'fre': 'fr',
-  'es': 'es', 'spa': 'es',
-  'de': 'de', 'ger': 'de',
-  'it': 'it', 'ita': 'it',
-  'ru': 'ru', 'rus': 'ru',
-  'ta': 'ta', // Assuming 'ta' as the enum value for Tamil
-  'tamil': 'ta', // User input 'tamil' maps to 'ta'
-  // Add more mappings as discovered or required
-};
+// Removed BITMAGNET_LANGUAGE_MAP as language filtering will be handled client-side.
 
 /**
  * GraphQL query for searching torrent content.
@@ -67,7 +55,6 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
             name
           }
         }
-        # Removed TorrentContentSearchResult fragment spread as it's not needed for inline fields
       }
     }
   }
@@ -89,7 +76,6 @@ const TORRENT_FILES_QUERY = `
           fileType
           size
         }
-        # Removed TorrentFilesQueryResult fragment spread
       }
     }
   }
@@ -101,6 +87,8 @@ const TORRENT_FILES_QUERY = `
  * @param {string} searchQuery - The search string (e.g., "Game of Thrones S01E01").
  * @param {number} minSeeders - Minimum seeders to filter results.
  * @param {Array<string>} preferredLanguages - Array of preferred language codes (e.g., ['en', 'fr']).
+ * Note: This parameter is kept for consistency with the caller, but language filtering is no longer
+ * applied directly in the Bitmagnet query; it's delegated to client-side matching.
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
 async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = ['en']) {
@@ -109,11 +97,8 @@ async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = 
     return [];
   }
 
-  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}, languages: ${preferredLanguages.join(', ')}`);
-
-  const mappedLanguages = preferredLanguages
-    .map(lang => BITMAGNET_LANGUAGE_MAP[lang.toLowerCase()])
-    .filter(Boolean); // Filter out any undefined/null values (languages not in map)
+  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
+  // Removed logging of preferred languages here as they are not used in the Bitmagnet query
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
@@ -125,21 +110,13 @@ async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = 
         ],
         facets: {
           contentType: {
-            filter: ['tv_show'] // CRITICAL FIX: Changed to 'tv_show' (lowercase) to match enum
+            filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
           }
         }
+        // Removed language facet filter as per requirement
       },
     },
   };
-
-  // Add language filter if mapped languages are available
-  if (mappedLanguages.length > 0) {
-    payload.variables.input.facets.language = {
-      filter: mappedLanguages
-    };
-    logger.debug(`Applying language filter to Bitmagnet query: ${mappedLanguages.join(', ')}`);
-  }
-
 
   logger.debug(`Bitmagnet GraphQL Request Payload: ${JSON.stringify(payload, null, 2)}`); // Log the full payload
 

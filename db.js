@@ -54,10 +54,10 @@ async function initializePg() {
           episode_number INTEGER NOT NULL,
           torrent_name TEXT NOT NULL,
           parsed_info_json JSONB,
-          real_debrid_torrent_id TEXT UNIQUE NOT NULL,
+          real_debrid_torrent_id TEXT,
           real_debrid_file_id TEXT,
-          real_debrid_link TEXT NOT NULL,
-          real_debrid_info_json JSONB, -- NEW COLUMN: Stores the full Real-Debrid torrent info JSON
+          real_debrid_link TEXT,
+          real_debrid_info_json JSONB,
           added_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           language_preference TEXT,
@@ -72,7 +72,7 @@ async function initializePg() {
       `);
       logger.info('Ensured "torrents" table exists in the database.');
 
-      // CRITICAL FIX: Add real_debrid_info_json column if it doesn't exist (for existing databases)
+      // Add real_debrid_info_json column if it doesn't exist (for existing databases)
       await pool.query(`
         DO $$
         BEGIN
@@ -80,9 +80,21 @@ async function initializePg() {
                 ALTER TABLE torrents ADD COLUMN real_debrid_info_json JSONB;
                 RAISE NOTICE 'Added real_debrid_info_json column to torrents table.';
             END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_torrent_id') THEN
+                ALTER TABLE torrents ADD COLUMN real_debrid_torrent_id TEXT;
+                RAISE NOTICE 'Added real_debrid_torrent_id column to torrents table.';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_file_id') THEN
+                ALTER TABLE torrents ADD COLUMN real_debrid_file_id TEXT;
+                RAISE NOTICE 'Added real_debrid_file_id column to torrents table.';
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_link') THEN
+                ALTER TABLE torrents ADD COLUMN real_debrid_link TEXT;
+                RAISE NOTICE 'Added real_debrid_link column to torrents table.';
+            END IF;
         END $$;
       `);
-      logger.info('Ensured real_debrid_info_json column exists in "torrents" table.');
+      logger.info('Ensured all Real-Debrid related columns exist in "torrents" table.');
 
     } catch (error) {
       logger.error('Failed to connect to PostgreSQL database or ensure schema:', error);

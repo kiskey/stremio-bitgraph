@@ -460,9 +460,9 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
               infoHash: selectedTorrentInfoHash,
               isCached: false // New streams are not initially from cache
             });
+        } catch (realDebridFlowError) {
+          logger.error('Error during Real-Debrid torrent processing flow (add/select/unrestrict):', realDebridFlowError.message, realDebridFlowError.stack, realDebridFlowError);
         }
-    } catch (realDebridFlowError) {
-      logger.error('Error during Real-Debrid torrent processing flow (add/select/unrestrict):', realDebridFlowError.message, realDebridFlowError.stack, realDebridFlowError);
     }
   }
 

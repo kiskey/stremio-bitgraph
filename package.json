@@ -23,7 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "@prisma/client": "^5.17.0",
-    "@stremio/addon-sdk": "^0.0.12",
+    "@stremio/addon-sdk": "^1.6.10",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "parse-torrent-title": "^1.4.0",

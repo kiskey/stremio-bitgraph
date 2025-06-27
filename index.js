@@ -156,36 +156,14 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
         continue;
     }
 
-    // Check if this infohash is already known to Real-Debrid via our cache (e.g., from another episode)
-    let existingRdTorrentId = null;
-    let existingRdInfoJson = null;
-    try {
-        const existingRdCheck = await dbQuery(
-            `SELECT real_debrid_torrent_id, real_debrid_info_json FROM torrents WHERE infohash = $1 AND real_debrid_torrent_id IS NOT NULL LIMIT 1`,
-            [selectedTorrentInfoHash]
-        );
-        if (existingRdCheck.rows.length > 0) {
-            existingRdTorrentId = existingRdCheck.rows[0].real_debrid_torrent_id;
-            try {
-                existingRdInfoJson = JSON.parse(existingRdCheck.rows[0].real_debrid_info_json);
-            } catch (e) {
-                logger.warn(`Failed to parse cached real_debrid_info_json for ${selectedTorrentInfoHash} during stream offering. Will treat as new.`);
-            }
-        }
-    } catch (dbCheckError) {
-        logger.error(`Error checking DB for existing RD torrent for infohash ${selectedTorrentInfoHash}: ${dbCheckError.message}`);
-    }
-
-    let streamNamePrefix = 'RD ';
-    let streamDescription = 'Click to prepare stream';
-
     // Construct the URL to our custom stream proxy endpoint
     // The client (Stremio) will hit this URL, and our addon will then handle Real-Debrid interaction
-    const streamUrl = `/stream/rd/${selectedTorrentInfoHash}/${matchedFileIndex || '0'}/${tmdbShowDetails.id}/${seasonNumber}/${episodeNumber}`;
+    // Pass realDebridApiKey as a query parameter for the proxy to use
+    const streamUrl = `/realdebrid_proxy/rd/${selectedTorrentInfoHash}/${matchedFileIndex || '0'}/${tmdbShowDetails.id}/${seasonNumber}/${episodeNumber}?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
 
     potentialStreams.push({
-      name: `${streamNamePrefix}| ${selectedTorrentName}`,
-      description: streamDescription,
+      name: `RD | ${selectedTorrentName}`,
+      description: `Click to prepare stream (Deferred)`,
       url: streamUrl,
       infoHash: selectedTorrentInfoHash,
       // Add more metadata if desired for sorting/display in Stremio UI
@@ -199,10 +177,11 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
 // --- Define the custom HTTP handler for on-demand Real-Debrid processing ---
 // This acts as a proxy that Stremio will hit when a user selects a deferred stream.
-builder.defineResourceHandler('stream', async ({ request, response }) => {
-  // Parse the custom URL path: /stream/rd/:infoHash/:fileIndex/:tmdbId/:seasonNumber/:episodeNumber
+// Changed resource name from 'stream' to 'realdebrid_proxy' to avoid conflict
+builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) => {
+  // Parse the custom URL path: /realdebrid_proxy/rd/:infoHash/:fileIndex/:tmdbId/:seasonNumber/:episodeNumber
   const pathParts = request.path.split('/');
-  // Expected path: ['', 'stream', 'rd', 'INFO_HASH', 'FILE_INDEX', 'TMDB_ID', 'SEASON', 'EPISODE']
+  // Expected path: ['', 'realdebrid_proxy', 'rd', 'INFO_HASH', 'FILE_INDEX', 'TMDB_ID', 'SEASON', 'EPISODE']
   if (pathParts.length !== 8 || pathParts[2] !== 'rd') {
       logger.error(`Invalid deferred stream request path: ${request.path}`);
       response.writeHead(400, { 'Content-Type': 'text/plain' });
@@ -216,9 +195,11 @@ builder.defineResourceHandler('stream', async ({ request, response }) => {
   const seasonNumber = parseInt(pathParts[6], 10);
   const episodeNumber = parseInt(pathParts[7], 10);
 
-  const fileIndex = fileIndexStr === '0' ? 0 : parseInt(fileIndexStr, 10); // Assume '0' means main file if no specific index
+  // fileIndex can be '0' if no specific index was matched, meaning main/largest file
+  const fileIndex = fileIndexStr === '0' ? 0 : parseInt(fileIndexStr, 10);
 
-  const { realDebridApiKey } = request.query; // Real-Debrid API Key should be passed as query param for proxy
+  // Real-Debrid API Key passed as query parameter
+  const realDebridApiKey = request.query.realDebridApiKey;
   if (!realDebridApiKey) {
       logger.error('Real-Debrid API Key missing in deferred stream request.');
       response.writeHead(401, { 'Content-Type': 'text/plain' });
@@ -253,6 +234,7 @@ builder.defineResourceHandler('stream', async ({ request, response }) => {
               }
 
               // If a direct *link for this specific fileIndex* is cached and the torrent is downloaded, use it directly.
+              // Also ensure the file_id matches because a torrent can have many files, and this specific episode link is cached.
               if (cachedTorrent.real_debrid_link && cachedTorrent.real_debrid_file_id == fileIndexStr &&
                   torrentInfoAfterAdd && torrentInfoAfterAdd.status === 'downloaded') {
                   realDebridDirectLink = cachedTorrent.real_debrid_link;
@@ -269,7 +251,12 @@ builder.defineResourceHandler('stream', async ({ request, response }) => {
       if (!realDebridDirectLink) {
           // If RD torrent ID is not known from cache, add the magnet
           if (!rdAddedTorrentId) {
-              const bitmagnetResults = await bitmagnet.searchTorrents(`"${tmdbId}"`); // Search bitmagnet again to get magnetUri if not in cache
+              // Search Bitmagnet for the magnet URI of the specific infoHash
+              // Note: tmdbId is passed to searchTorrents as a placeholder, it expects a string like "Show Title"
+              // For a specific infoHash, we need to get the magnet URI.
+              // Assuming bitmagnet.searchTorrents can return by infoHash or we need to refine it.
+              // For now, doing a broad search and finding the matching torrent's magnetUri.
+              const bitmagnetResults = await bitmagnet.searchTorrents(`"${tmdbId}"`); // This is a general search
               const matchingTorrent = bitmagnetResults.find(t => (t.torrent ? t.torrent.infoHash : t.infoHash) === infoHash);
 
               if (!matchingTorrent || !(matchingTorrent.torrent ? matchingTorrent.torrent.magnetUri : null)) {
@@ -303,6 +290,7 @@ builder.defineResourceHandler('stream', async ({ request, response }) => {
           }
 
           // Select files (even if already selected, harmless to call again)
+          // `fileIndexStr` can be '0' which is fine for selectFiles
           logger.info(`Selecting files ${fileIndexStr} for torrent ${rdAddedTorrentId}.`);
           await realDebrid.selectFiles(realDebridApiKey, rdAddedTorrentId, fileIndexStr);
 
@@ -328,7 +316,13 @@ builder.defineResourceHandler('stream', async ({ request, response }) => {
 
           // Update DB with the newly obtained direct link and full info
           try {
-              const tmdbShowDetailsForDb = await tmdb.getTvShowDetails(tmdbId); // Re-fetch minimal TMDB info for DB if needed
+              // Fetch tmdbShowDetails for DB persistence if not available from cached torrent
+              let currentTmdbShowTitle = '';
+              const tmdbDetailsForDb = await tmdb.getTvShowDetails(tmdbId);
+              if (tmdbDetailsForDb) {
+                  currentTmdbShowTitle = tmdbDetailsForDb.name;
+              }
+
               const selectedTorrentNameForDb = torrentInfoAfterAdd.original_filename || torrentInfoAfterAdd.filename || 'Unknown Torrent Name';
               const parsedInfoForDb = matcher.parseTorrentInfo(selectedTorrentNameForDb);
               const rdInfoJsonString = JSON.stringify(torrentInfoAfterAdd);

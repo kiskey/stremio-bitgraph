@@ -96,21 +96,25 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
 
   logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
 
+  const payload = {
+    query: TORRENT_CONTENT_SEARCH_QUERY,
+    variables: {
+      query: searchQuery,
+      orderBy: [
+        { field: 'SEEDERS', direction: 'DESC' }
+      ],
+      // Bitmagnet's text search guide allows `min_seeders` in query string
+      // If `minSeeders` is a direct filter in GraphQL, it would be here.
+      // Assuming it's part of the `TorrentContentSearch` filter arguments.
+      // If not, client-side filtering would be needed after results.
+    },
+  };
+
+  logger.debug(`Bitmagnet GraphQL Request Payload: ${JSON.stringify(payload, null, 2)}`); // Log the full payload
+
   try {
     const response = await retryWithExponentialBackoff(
-      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, {
-        query: TORRENT_CONTENT_SEARCH_QUERY,
-        variables: {
-          query: searchQuery,
-          orderBy: [
-            { field: 'SEEDERS', direction: 'DESC' }
-          ],
-          // Bitmagnet's text search guide allows `min_seeders` in query string
-          // If `minSeeders` is a direct filter in GraphQL, it would be here.
-          // Assuming it's part of the `TorrentContentSearch` filter arguments.
-          // If not, client-side filtering would be needed after results.
-        },
-      }),
+      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload), // Use the prepared payload
       config.bitmagnet.retry
     );
 
@@ -123,6 +127,14 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
 
   } catch (error) {
     logger.error(`Error searching Bitmagnet for "${searchQuery}":`, error.message);
+    if (error.response) {
+      logger.error('Bitmagnet HTTP Response Status:', error.response.status);
+      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+    } else if (error.request) {
+      logger.error('Bitmagnet Request was made but no response was received:', error.request);
+    } else {
+      logger.error('Error setting up Bitmagnet request:', error.message);
+    }
     if (error.response && error.response.data && error.response.data.errors) {
       logger.error('Bitmagnet GraphQL Errors:', JSON.stringify(error.response.data.errors, null, 2));
     }
@@ -143,14 +155,17 @@ async function getTorrentFiles(infoHash) {
   }
 
   logger.debug(`Fetching files for infohash: ${infoHash}`);
+  const payload = {
+    query: TORRENT_FILES_QUERY,
+    variables: {
+      infoHash: infoHash,
+    },
+  };
+  logger.debug(`Bitmagnet Torrent Files Request Payload: ${JSON.stringify(payload, null, 2)}`);
+
   try {
     const response = await retryWithExponentialBackoff(
-      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, {
-        query: TORRENT_FILES_QUERY,
-        variables: {
-          infoHash: infoHash,
-        },
-      }),
+      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
       config.bitmagnet.retry
     );
 
@@ -158,7 +173,15 @@ async function getTorrentFiles(infoHash) {
     logger.debug(`Found ${files.length} files for infohash ${infoHash}.`);
     return files;
   } catch (error) {
-    logger.error(`Error fetching torrent files for ${infoHash} from Bitmagnet:`, error.message);
+    logger.error(`Error fetching torrent files for ${infoHash} from Bitmagnet: ${error.message}`);
+    if (error.response) {
+      logger.error('Bitmagnet HTTP Response Status:', error.response.status);
+      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+    } else if (error.request) {
+      logger.error('Bitmagnet Request was made but no response was received:', error.request);
+    } else {
+      logger.error('Error setting up Bitmagnet torrent files request:', error.message);
+    }
     if (error.response && error.response.data && error.response.data.errors) {
       logger.error('Bitmagnet GraphQL Errors:', JSON.stringify(error.response.data.errors, null, 2));
     }

@@ -32,7 +32,7 @@ const LANGUAGE_PREFERENCE_SCORES = {
  */
 function parseTorrentInfo(torrentName) {
   if (!torrentName || typeof torrentName !== 'string' || torrentName.length === 0) {
-    logger.warn(`Failed to parse torrent filename "${torrentName}": Invalid input.`);
+    // logger.warn(`Failed to parse torrent filename "${torrentName}": Invalid input.`);
     return null;
   }
   try {
@@ -56,28 +56,28 @@ function parseTorrentInfo(torrentName) {
 function cleanParsedTorrentTitle(parsedInfo) {
     let cleanedTitle = parsedInfo.title || '';
 
-    // Remove common website/source prefixes
+    // Remove common website/source prefixes/suffixes that parse-torrent-title might include
     cleanedTitle = cleanedTitle.replace(/^(www\.[a-z0-9]+\.org\s*-\s*)/i, '');
     cleanedTitle = cleanedTitle.replace(/(\s*-\s*www\.[a-z0-9]+\.org)$/i, '');
     cleanedTitle = cleanedTitle.replace(/(\s*-\s*UIndex\.org)$/i, ''); // Specific fix for UIndex example
 
     // Remove year if it's at the end or start of the title and already parsed separately
+    // Only remove if it's a four-digit number likely representing a year
     if (parsedInfo.year && cleanedTitle.includes(String(parsedInfo.year))) {
         cleanedTitle = cleanedTitle.replace(new RegExp(`\\s*${parsedInfo.year}\\s*`, 'g'), ' ').trim();
     }
 
     // Remove known release group tags from the title itself if they are distinct
-    if (parsedInfo.group && cleanedTitle.toLowerCase().endsWith(parsedInfo.group.toLowerCase())) {
-        cleanedTitle = cleanedTitle.substring(0, cleanedTitle.length - parsedInfo.group.length).trim();
+    if (parsedInfo.group) {
+        // Use a regex to match the group name at the end, case-insensitive, with potential delimiters
+        cleanedTitle = cleanedTitle.replace(new RegExp(`\\s*[\\-\\[\\(]?${parsedInfo.group}[\\)\\]]?$`, 'i'), '').trim();
     }
 
-    // Remove common trailing numbers/quality that might be part of release names but not title
+    // Remove common trailing numbers/quality/codec tags that might be part of release names but not title
     cleanedTitle = cleanedTitle.replace(/\s+\d{3,4}p$/, '').trim(); // e.g., "Show Title 1080p" -> "Show Title"
-    cleanedTitle = cleanedTitle.replace(/\s+x264$/, '').trim();
-    cleanedTitle = cleanedTitle.replace(/\s+x265$/, '').trim();
-    cleanedTitle = cleanedTitle.replace(/\s+HEVC$/, '').trim();
-    cleanedTitle = cleanedTitle.replace(/\s+H\.264$/, '').trim();
-    cleanedTitle = cleanedTitle.replace(/\s+FENiX$/i, '').trim(); // Specific release group from example
+    cleanedTitle = cleanedTitle.replace(/\s+(x264|x265|HEVC|H\.264|DD5\.1)$/i, '').trim(); // Remove common codecs/audio
+    cleanedTitle = cleanedTitle.replace(/\s+WEBRip$/i, '').trim(); // Remove source
+    cleanedTitle = cleanedTitle.replace(/\s+AMZN$/i, '').trim(); // Remove specific source identifier
 
     // Remove multiple spaces
     cleanedTitle = cleanedTitle.replace(/\s+/g, ' ').trim();
@@ -101,7 +101,8 @@ function calculateSimilarity(str1, str2) {
 
 /**
  * Determines if a torrent or file path matches the requested episode.
- * This is now more lenient to identify season packs without explicit episode numbers.
+ * This is now more lenient to identify season packs without explicit episode numbers
+ * in the top-level name, but with matching season.
  * @param {object} parsedInfo - Parsed info from parseTorrentInfo.
  * @param {number} targetSeason - Target season number.
  * @param {number} targetEpisode - Target episode number.
@@ -112,18 +113,28 @@ function isEpisodeMatch(parsedInfo, targetSeason, targetEpisode) {
     return false;
   }
 
-  // Check for direct episode match (SxxExx)
-  const seasonEpisodeMatch = (parsedInfo.season === targetSeason && parsedInfo.episode === targetEpisode);
-  // Check if it's an episode within a parsed range (SxxE[start]-[end])
-  const isEpisodeInParsedRange = (parsedInfo.season === targetSeason && parsedInfo.range &&
-                                  targetEpisode >= parsedInfo.range.start && targetEpisode <= parsedInfo.range.end);
-  // Check if it's explicitly identified as a season pack and matches the season
-  const isSeasonPack = (parsedInfo.season === targetSeason && (parsedInfo.isCompleteSeason || parsedInfo.seasonpack));
-  // Check if it's a general season match without an explicit episode (e.g., "Show S01" implies a season pack)
-  const isGeneralSeasonMatch = (parsedInfo.season === targetSeason && (parsedInfo.episode === undefined || parsedInfo.episode === null));
+  // Case 1: Direct Episode Match (SxxExx or SxxE[start]-[end])
+  const isDirectEpisodeMatch = (parsedInfo.season === targetSeason &&
+                                (parsedInfo.episode === targetEpisode ||
+                                 (Array.isArray(parsedInfo.episode) && parsedInfo.episode.includes(targetEpisode)) ||
+                                 (parsedInfo.range && targetEpisode >= parsedInfo.range.start && targetEpisode <= parsedInfo.range.end)));
 
-  if (seasonEpisodeMatch || isEpisodeInParsedRange || isSeasonPack || isGeneralSeasonMatch) {
-    logger.debug(`Match found for S${targetSeason}E${targetEpisode} in parsed info: ${parsedInfo.originalName}. Type: ${seasonEpisodeMatch ? 'Episode' : isEpisodeInParsedRange ? 'Range' : isSeasonPack ? 'Season Pack' : 'General Season'}`);
+  // Case 2: Season Pack Match (Sxx without explicit Exx, but matches season)
+  // This covers names like "Show.S01.Pack" or "Show.2025.S01.1080p"
+  const isSeasonPackMatch = (parsedInfo.season === targetSeason &&
+                             (parsedInfo.episode === undefined || parsedInfo.episode === null || Array.isArray(parsedInfo.episode)) &&
+                             (parsedInfo.isCompleteSeason || parsedInfo.seasonpack));
+
+  // Case 3: General Season Match (Sxx present, but no explicit episode or pack flag from PTT)
+  // This covers cases like "Revival.S01.400p.Ultradox" where PTT gives season but not isCompleteSeason/seasonpack
+  const isGeneralSeasonMatch = (parsedInfo.season === targetSeason &&
+                                (parsedInfo.episode === undefined || parsedInfo.episode === null));
+
+
+  if (isDirectEpisodeMatch || isSeasonPackMatch || isGeneralSeasonMatch) {
+    logger.debug(`Match found for S${targetSeason}E${targetEpisode} in parsed info: ${parsedInfo.originalName}. Type: ${
+      isDirectEpisodeMatch ? 'Direct Episode' : isSeasonPackMatch ? 'Season Pack' : 'General Season'
+    }`);
     return true;
   }
 
@@ -155,34 +166,110 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   const parsedTorrent = parseTorrentInfo(torrentName);
   if (!parsedTorrent) {
     logger.warn(`Could not parse overall torrent name: "${torrentName}". Skipping.`);
-    return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null };
+    return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
   }
 
-  // CRITICAL FIX: Only use the cleaned parsed torrent title for similarity
+  // Only use the cleaned parsed torrent title for similarity
   const titleForSimilarity = cleanParsedTorrentTitle(parsedTorrent);
 
   const titleSimilarity = calculateSimilarity(titleForSimilarity || '', tmdbShowTitle);
   logger.debug(`Title similarity for "${titleForSimilarity}" vs "${tmdbShowTitle}": ${titleSimilarity.toFixed(2)}`);
 
   // Initial title similarity filter. This is the first gate.
-  if (titleSimilarity < 0.5) { // Adjustable threshold for initial filtering
+  // We keep this lenient (e.g., 0.5) to catch variations, but if it's too low, it's irrelevant.
+  if (titleSimilarity < 0.5) {
     logger.debug(`Title similarity too low (${titleSimilarity.toFixed(2)}). Skipping torrent.`);
-    return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null };
+    return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
   }
   score += titleSimilarity * 100; // Boost this heavily as it's the primary match factor
 
 
-  // Now, check for episode match based on the parsed torrent name.
-  // If it's not an episode or season pack match, it's irrelevant.
-  const isTorrentEpisodeOrPackMatch = isEpisodeMatch(parsedTorrent, targetSeason, targetEpisode);
-  if (!isTorrentEpisodeOrPackMatch) {
-      logger.debug(`Torrent name does not match episode or season pack. Skipping: "${torrentName}"`);
-      return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null };
+  let matchedFileIndex = null;
+  let matchedFilePath = null;
+  let finalParsedInfo = parsedTorrent; // This will hold the parsed info of the winning item (torrent or file)
+
+  // Determine if we need to inspect individual files.
+  // We MUST inspect files if:
+  // 1. The torrent name itself is NOT a direct episode match (e.g., it's a season pack).
+  // 2. The title similarity is high enough (>= 0.75) to warrant a deeper look.
+  const isTorrentDirectEpisodeMatch = (parsedTorrent.season === targetSeason && parsedTorrent.episode === targetEpisode);
+  const needsFileInspection = !isTorrentDirectEpisodeMatch || titleSimilarity >= 0.75;
+
+
+  if (needsFileInspection) {
+    logger.debug(`Torrent is a potential pack or title similarity is high enough (${titleSimilarity.toFixed(2)}). Inspecting individual files for "${torrentName}".`);
+
+    let filesToProcess = torrent ? torrent.files : null;
+    // If files are not embedded in the initial search result, fetch them directly from Bitmagnet.
+    if (!filesToProcess || filesToProcess.length === 0) {
+        logger.debug(`Files not available in search result for ${torrentInfoHash}, attempting to fetch directly.`);
+        if (torrentInfoHash && torrentInfoHash !== 'N/A') {
+            try {
+                filesToProcess = await bitmagnet.getTorrentFiles(torrentInfoHash);
+            } catch (err) {
+                logger.error(`Error fetching individual files for ${torrentInfoHash}: ${err.message}. Skipping file inspection.`);
+                filesToProcess = []; // Ensure it's an empty array on error
+            }
+        } else {
+            logger.warn(`Cannot fetch files, torrent infoHash is invalid for "${torrentName}". Skipping file inspection.`);
+            filesToProcess = [];
+        }
+    }
+
+    if (filesToProcess && filesToProcess.length > 0) {
+      let currentBestFileScore = -Infinity; // Keep track of the best file score found within this torrent
+      let bestFileParsedInfo = null;
+
+      for (const file of filesToProcess) {
+        const parsedFile = parseTorrentInfo(file.path);
+        if (parsedFile) {
+          const isFileEpisodeMatch = isEpisodeMatch(parsedFile, targetSeason, targetEpisode); // Use refined isEpisodeMatch
+          if (isFileEpisodeMatch) {
+            // Score the individual file, boosting it significantly
+            const fileTitleForSimilarity = cleanParsedTorrentTitle(parsedFile);
+            const fileScore = 500 + calculateSimilarity(fileTitleForSimilarity, tmdbShowTitle) * 50; // Boost for file title
+            
+            if (fileScore > currentBestFileScore) {
+              currentBestFileScore = fileScore;
+              matchedFileIndex = file.index;
+              matchedFilePath = file.path;
+              bestFileParsedInfo = parsedFile;
+              logger.debug(`Found better file match in "${torrentName}": "${file.path}". Score: ${fileScore}`);
+            }
+          }
+        } else {
+            logger.warn(`Could not parse file path: "${file.path}" within torrent "${torrentName}".`);
+        }
+      }
+
+      if (bestFileParsedInfo && currentBestFileScore > -Infinity) {
+          score += currentBestFileScore; // Add the score of the best matched file
+          finalParsedInfo = bestFileParsedInfo; // Use file's parsed info for final output
+          logger.debug(`Final parsed info updated from best matching file.`);
+      } else {
+          // If it was a pack/potential pack but no specific file matched the episode, penalize.
+          logger.warn(`Torrent was a pack/potential pack, but no specific file for S${targetSeason}E${targetEpisode} found in files: "${torrentName}". Penalizing.`);
+          return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
+      }
+    } else {
+        logger.warn(`No files found for torrent "${torrentName}" (InfoHash: ${torrentInfoHash}) that could be processed for file-level matching, and it required file inspection. Penalizing.`);
+        return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
+    }
+  } else {
+      // If it's a direct single-episode torrent (as per PTT) and does not need file inspection
+      matchedFileIndex = 0; // Assume index 0 for single file torrents if not explicitly found.
+      matchedFilePath = torrentName; // Use torrent name as path if single file
+      logger.debug(`Torrent "${torrentName}" is a direct single episode torrent, assuming main file at index 0.`);
+      // Score already includes base 1000 for direct episode match.
   }
-  score += 100; // Base score for being a relevant torrent (episode or season pack)
 
+  // If after all checks, we still don't have a valid parsedInfo (e.g., if the initial parse failed
+  // and no file-level match saved it), return -Infinity.
+  if (!finalParsedInfo) {
+      return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
+  }
 
-  // Language Scoring
+  // Language Scoring (using finalParsedInfo for quality and language)
   const torrentLanguages = bitmagnetItem.languages ? bitmagnetItem.languages.map(lang => lang.id.toLowerCase()) : [];
   let languageScore = 0;
   let foundLanguage = false;
@@ -191,29 +278,20 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
     if (torrentLanguages.includes(preferredLang)) {
       languageScore = LANGUAGE_PREFERENCE_SCORES[preferredLang] || 0;
       foundLanguage = true;
-      logger.debug(`Torrent has preferred language "${preferredLang}". Base language score: ${languageScore}.`);
-      break; // Take the first matched preferred language
+      logger.debug(`Torrent has preferred language "${preferredLang}" from Bitmagnet. Base language score: ${languageScore}.`);
+      break;
     }
-    // Also check for aliases if the preferred language is an alias (e.g., 'tam' for 'tamil')
-    if (preferredLang === 'tam' && torrentLanguages.includes('tamil')) {
-        languageScore = LANGUAGE_PREFERENCE_SCORES['tamil'] || 0;
+    // Check for aliases (e.g., 'tam' for 'tamil', 'eng' for 'en')
+    if ((preferredLang === 'tam' && torrentLanguages.includes('tamil')) || (preferredLang === 'eng' && torrentLanguages.includes('en'))) {
+        languageScore = LANGUAGE_PREFERENCE_SCORES[preferredLang] || 0; // Use the score of the alias or the full name
         foundLanguage = true;
-        logger.debug(`Torrent has language 'tamil' matching preferred alias 'tam'. Base language score: ${languageScore}.`);
-        break;
-    }
-    if (preferredLang === 'eng' && torrentLanguages.includes('en')) {
-        languageScore = LANGUAGE_PREFERENCE_SCORES['en'] || 0;
-        foundLanguage = true;
-        logger.debug(`Torrent has language 'en' matching preferred alias 'eng'. Base language score: ${languageScore}.`);
+        logger.debug(`Torrent has language matching preferred alias '${preferredLang}' from Bitmagnet. Base language score: ${languageScore}.`);
         break;
     }
   }
 
-  // If no language found from Bitmagnet, try to use parsedTorrent.languages (from ptt)
-  // PTT's language parsing can sometimes be less reliable or use different codes.
-  if (!foundLanguage && parsedTorrent.languages && parsedTorrent.languages.length > 0) {
-      const parsedTorrentLang = parsedTorrent.languages[0].toLowerCase(); // Assuming first language from ptt
-      // Check if this parsed language is in our preference map or an alias
+  if (!foundLanguage && finalParsedInfo.languages && finalParsedInfo.languages.length > 0) {
+      const parsedTorrentLang = finalParsedInfo.languages[0].toLowerCase();
       let pttLanguageScore = LANGUAGE_PREFERENCE_SCORES[parsedTorrentLang] || 0;
       if (parsedTorrentLang === 'tamil' && !pttLanguageScore) pttLanguageScore = LANGUAGE_PREFERENCE_SCORES['tam'];
       if (parsedTorrentLang === 'english' && !pttLanguageScore) pttLanguageScore = LANGUAGE_PREFERENCE_SCORES['en'];
@@ -226,8 +304,7 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   }
 
   if (!foundLanguage) {
-      // If no language info at all from Bitmagnet or PTT, default to English score
-      languageScore = LANGUAGE_PREFERENCE_SCORES['en'] || 0;
+      languageScore = LANGUAGE_PREFERENCE_SCORES['en'] || 0; // Default to English score if no language found
       logger.debug(`Torrent has no specified language. Defaulting to English score: ${languageScore}.`);
   }
   score += languageScore;
@@ -236,97 +313,20 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   // Prioritize torrents with more seeders
   score += (bitmagnetItem.seeders || 0) * 0.1;
 
-  // Prefer higher quality (simple example, can be more complex based on ptt resolution)
-  if (parsedTorrent.resolution === '2160p') score += 20;
-  else if (parsedTorrent.resolution === '1080p') score += 15;
-  else if (parsedTorrent.resolution === '720p') score += 10;
-  // Add other quality indicators if available in parsedTorrent (e.g., hdr, dolbyvision)
-  if (parsedTorrent.hdr) score += 5;
-  if (parsedTorrent.dolbyvision) score += 5;
+  // Prefer higher quality (using finalParsedInfo)
+  if (finalParsedInfo.resolution === '2160p') score += 20;
+  else if (finalParsedInfo.resolution === '1080p') score += 15;
+  else if (finalParsedInfo.resolution === '720p') score += 10;
+  if (finalParsedInfo.hdr) score += 5;
+  if (finalParsedInfo.dolbyvision) score += 5;
 
-
-  let matchedFileIndex = null;
-  let matchedFilePath = null;
-
-  const torrentFiles = torrent ? torrent.files : null;
-
-  // We only need to inspect individual files if the torrent is a season pack or range,
-  // or if the torrent name itself doesn't directly indicate the episode.
-  // The `isEpisodeMatch` now handles the initial check if torrentName implies pack/range.
-  const needsFileInspection = !parsedTorrent.episode || Array.isArray(parsedTorrent.episode) || parsedTorrent.range || parsedTorrent.isCompleteSeason || parsedTorrent.seasonpack;
-
-  if (needsFileInspection) {
-    logger.debug(`Torrent is identified as a multi-episode pack or needs file inspection, processing files for "${torrentName}".`);
-
-    let filesToProcess = torrentFiles;
-    // If files are not embedded in the initial search result, fetch them directly from Bitmagnet.
-    if (!filesToProcess || filesToProcess.length === 0) {
-        logger.debug(`Files not available in search result for ${torrentInfoHash}, attempting to fetch directly.`);
-        // Added a check here to ensure we only try to fetch files if infoHash is valid.
-        if (torrentInfoHash && torrentInfoHash !== 'N/A') {
-            filesToProcess = await bitmagnet.getTorrentFiles(torrentInfoHash);
-        } else {
-            logger.warn(`Cannot fetch files, torrent infoHash is invalid for "${torrentName}".`);
-            filesToProcess = [];
-        }
-    }
-
-    if (filesToProcess && filesToProcess.length > 0) {
-      let currentBestFileScore = -Infinity; // Keep track of the best file score found within this torrent
-      let foundSpecificEpisodeFile = false; // Flag to ensure at least one file matches the episode
-
-      for (const file of filesToProcess) {
-        const parsedFile = parseTorrentInfo(file.path);
-        if (parsedFile) {
-          // Check if the individual file matches the target episode
-          const isFileEpisodeMatch = isEpisodeMatch(parsedFile, targetSeason, targetEpisode); // Use isEpisodeMatch here
-
-          if (isFileEpisodeMatch) {
-            foundSpecificEpisodeFile = true; // Mark that a file for the episode was found
-            // Score the individual file, boosting it significantly
-            // Only use the cleaned parsed file title for similarity
-            const fileTitleForSimilarity = cleanParsedTorrentTitle(parsedFile);
-            const fileScore = 500 + calculateSimilarity(fileTitleForSimilarity, tmdbShowTitle) * 50; // Boost for file title
-            if (fileScore > currentBestFileScore) {
-              currentBestFileScore = fileScore;
-              matchedFileIndex = file.index;
-              matchedFilePath = file.path;
-              logger.debug(`Found better file match in "${torrentName}": "${file.path}". Score: ${fileScore}`);
-            }
-          }
-        } else {
-            logger.warn(`Could not parse file path: "${file.path}" within torrent "${torrentName}".`);
-        }
-      }
-
-      if (foundSpecificEpisodeFile && currentBestFileScore > -Infinity) {
-          score += currentBestFileScore; // Add the score of the best matched file
-      } else {
-          // If it was a pack but no specific file matched the episode, penalize this torrent.
-          logger.warn(`Torrent was a pack, but no specific file for S${targetSeason}E${targetEpisode} found in files: "${torrentName}". Penalizing.`);
-          return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null };
-      }
-    } else {
-        logger.warn(`No files found for torrent "${torrentName}" (InfoHash: ${torrentInfoHash}) to perform file-level matching, and it requires file inspection. Penalizing.`);
-        // If it's a pack type and no files are available or match, it's a bad torrent for this episode.
-        return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null };
-    }
-  } else {
-      // If it's a single episode torrent (as per PTT) and it already passed isEpisodeMatch at the torrent level,
-      // and it does not need file inspection, then its 'matchedFileIndex' should be 0 or null/undefined
-      // indicating the main file, and `real-debrid` will usually pick the largest.
-      // This is the case for torrents like "Show.Name.S01E01.1080p.WEB.mkv"
-      matchedFileIndex = 0; // Assume index 0 for single file torrents if not explicitly found.
-      matchedFilePath = torrentName; // Use torrent name as path if single file
-      logger.debug(`Torrent "${torrentName}" is a single episode torrent, assuming main file at index 0.`);
-  }
 
   return {
     torrent: bitmagnetItem,
     score: score,
     matchedFileIndex: matchedFileIndex,
     matchedFilePath: matchedFilePath,
-    parsedInfo: parsedTorrent
+    parsedInfo: finalParsedInfo // Ensure this is the most accurate parsed info (torrent or file)
   };
 }
 
@@ -343,7 +343,6 @@ async function findBestTorrentMatch(bitmagnetResults, tmdbEpisodeDetails, tmdbSh
   const scoredTorrents = [];
 
   for (const bitmagnetItem of bitmagnetResults) {
-    // Pass preferredLanguages to scoreTorrent for language-based scoring
     const result = await scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, preferredLanguages);
     if (result.score > -Infinity) { // Only add if it's a valid candidate
       scoredTorrents.push(result);
@@ -359,7 +358,7 @@ async function findBestTorrentMatch(bitmagnetResults, tmdbEpisodeDetails, tmdbSh
 }
 
 module.exports = {
-  parseTorrentInfo,
+  parseTorrentInfo, // Renamed from parseFilename for clarity
   findBestTorrentMatch,
   cleanParsedTorrentTitle // Export for potential testing/reuse
 };

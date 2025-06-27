@@ -25,6 +25,16 @@ const LANGUAGE_PREFERENCE_SCORES = {
 };
 
 /**
+ * Escapes special characters in a string to be safely used in a regular expression.
+ * @param {string} string - The string to escape.
+ * @returns {string} The escaped string.
+ */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
+
+
+/**
  * Parses a torrent name or file path to extract structured information.
  * Handles cases where torrentName might be undefined or null.
  * @param {string} torrentName - The name of the torrent or file.
@@ -69,8 +79,10 @@ function cleanParsedTorrentTitle(parsedInfo) {
 
     // Remove known release group tags from the title itself if they are distinct
     if (parsedInfo.group) {
+        // CRITICAL FIX: Escape parsedInfo.group to prevent regex syntax errors
+        const escapedGroup = escapeRegExp(parsedInfo.group);
         // Use a regex to match the group name at the end, case-insensitive, with potential delimiters
-        cleanedTitle = cleanedTitle.replace(new RegExp(`\\s*[\\-\\[\\(]?${parsedInfo.group}[\\)\\]]?$`, 'i'), '').trim();
+        cleanedTitle = cleanedTitle.replace(new RegExp(`\\s*[\\-\\[\\(]?${escapedGroup}[\\)\\]]?$`, 'i'), '').trim();
     }
 
     // Remove common trailing numbers/quality/codec tags that might be part of release names but not title
@@ -120,20 +132,21 @@ function isEpisodeMatch(parsedInfo, targetSeason, targetEpisode) {
                                  (parsedInfo.range && targetEpisode >= parsedInfo.range.start && targetEpisode <= parsedInfo.range.end)));
 
   // Case 2: Season Pack Match (Sxx without explicit Exx, but matches season)
-  // This covers names like "Show.S01.Pack" or "Show.2025.S01.1080p"
-  const isSeasonPackMatch = (parsedInfo.season === targetSeason &&
+  // This covers names like "Show.S01.Pack" or "Show.2025.S01.1080p" where ptt provides isCompleteSeason or seasonpack
+  const isSeasonPackExplicit = (parsedInfo.season === targetSeason &&
                              (parsedInfo.episode === undefined || parsedInfo.episode === null || Array.isArray(parsedInfo.episode)) &&
                              (parsedInfo.isCompleteSeason || parsedInfo.seasonpack));
 
   // Case 3: General Season Match (Sxx present, but no explicit episode or pack flag from PTT)
   // This covers cases like "Revival.S01.400p.Ultradox" where PTT gives season but not isCompleteSeason/seasonpack
-  const isGeneralSeasonMatch = (parsedInfo.season === targetSeason &&
+  // This implies it's a pack *if* there's no explicit episode.
+  const isGeneralSeasonMatchImplicit = (parsedInfo.season === targetSeason &&
                                 (parsedInfo.episode === undefined || parsedInfo.episode === null));
 
 
-  if (isDirectEpisodeMatch || isSeasonPackMatch || isGeneralSeasonMatch) {
+  if (isDirectEpisodeMatch || isSeasonPackExplicit || isGeneralSeasonMatchImplicit) {
     logger.debug(`Match found for S${targetSeason}E${targetEpisode} in parsed info: ${parsedInfo.originalName}. Type: ${
-      isDirectEpisodeMatch ? 'Direct Episode' : isSeasonPackMatch ? 'Season Pack' : 'General Season'
+      isDirectEpisodeMatch ? 'Direct Episode' : isSeasonPackExplicit ? 'Season Pack Explicit' : 'General Season Implicit'
     }`);
     return true;
   }
@@ -176,7 +189,6 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   logger.debug(`Title similarity for "${titleForSimilarity}" vs "${tmdbShowTitle}": ${titleSimilarity.toFixed(2)}`);
 
   // Initial title similarity filter. This is the first gate.
-  // We keep this lenient (e.g., 0.5) to catch variations, but if it's too low, it's irrelevant.
   if (titleSimilarity < 0.5) {
     logger.debug(`Title similarity too low (${titleSimilarity.toFixed(2)}). Skipping torrent.`);
     return { torrent: bitmagnetItem, score: -Infinity, matchedFileIndex: null, matchedFilePath: null, parsedInfo: null };
@@ -191,7 +203,8 @@ async function scoreTorrent(bitmagnetItem, tmdbEpisodeDetails, tmdbShowTitle, pr
   // Determine if we need to inspect individual files.
   // We MUST inspect files if:
   // 1. The torrent name itself is NOT a direct episode match (e.g., it's a season pack).
-  // 2. The title similarity is high enough (>= 0.75) to warrant a deeper look.
+  // 2. The title similarity is high enough (>= 0.75) to warrant a deeper look, even if it *is* a direct episode match,
+  //    to ensure we find the *best* file within multi-file torrents.
   const isTorrentDirectEpisodeMatch = (parsedTorrent.season === targetSeason && parsedTorrent.episode === targetEpisode);
   const needsFileInspection = !isTorrentDirectEpisodeMatch || titleSimilarity >= 0.75;
 

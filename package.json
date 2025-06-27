@@ -22,7 +22,7 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "@prisma/client": "^5.17.0",
+        "pg": "^8.12.0", 
     "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",

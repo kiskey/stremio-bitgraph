@@ -23,7 +23,7 @@ const config = {
     // These are placeholders if you ever expand to a full OAuth implementation.
     clientId: process.env.REALDEBRID_CLIENT_ID || 'YOUR_REALDEBRID_CLIENT_ID',
     clientSecret: process.env.REALDEBRID_CLIENT_SECRET || 'YOUR_REALDEBRID_CLIENT_SECRET',
-    baseUrl: 'https://api.real-debrid.com/api/v2',
+    baseUrl: 'https://api.real-debrid.com/rest/1.0', // CRITICAL FIX: Corrected Real-Debrid API base URL
     // Rate limit: 250 requests per minute
     rateLimitDelayMs: 240, // Approximately 250 requests per minute (60000ms / 250 = 240ms)
     // Retry strategy for Real-Debrid API calls

@@ -4,11 +4,10 @@
  * Initializes the Stremio addon, defines stream handlers, and orchestrates the content delivery.
  */
 
-// Corrected: addonBuilder is likely a named export along with serveHTTP and get
-const { serveHTTP, get, addonBuilder } = require('stremio-addon-sdk');
+const { serveHTTP, addonBuilder } = require('stremio-addon-sdk');
 const manifest = require('./manifest');
 const config = require('./config');
-const { initializePrisma, getPrismaClient } = require('./db');
+const { initializePg, query: dbQuery } = require('./db'); // Renamed query to dbQuery to avoid conflict
 const tmdb = require('./src/tmdb');
 const bitmagnet = require('./src/bitmagnet');
 const realDebrid = require('./src/realdebrid');
@@ -16,9 +15,8 @@ const matcher = require('./src/matcher');
 const { logger } = require('./src/utils');
 const axios = require('axios'); // Import axios for direct TMDB find call
 
-// Initialize Prisma Client on startup
-initializePrisma();
-const prisma = getPrismaClient();
+// Initialize PostgreSQL connection pool on startup
+initializePg();
 
 // Create the addon builder
 const builder = new addonBuilder(manifest);
@@ -51,8 +49,8 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   const preferredLanguages = addonConfig.preferredLanguages ?
     addonConfig.preferredLanguages.split(',').map(lang => lang.trim().toLowerCase()) :
     ['en'];
-  const minSeeders = addonConfig.minSeeders || config.minSeeders || 5; // Default to 5
-  const levenshteinThreshold = addonConfig.levenshteinThreshold || config.levenshteinThreshold || 7;
+  const minSeeders = addonConfig.minSeeders ? parseInt(addonConfig.minSeeders, 10) : config.minSeeders; // Ensure integer
+  const levenshteinThreshold = addonConfig.levenshteinThreshold ? parseInt(addonConfig.levenshteinThreshold, 10) : config.levenshteinThreshold; // Ensure integer
 
 
   let tmdbShowDetails;
@@ -62,7 +60,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   try {
     // 1. Get TMDB show details to find TMDB ID for the IMDb ID
     // Use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
-    const tmdbFindResponse = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}`, {
+    const tmdbFindResponse = await axios.get(`${config.tmdb.baseUrl}/find/${imdbId}`, {
       params: {
         external_source: 'imdb_id',
         api_key: config.tmdb.apiKey,
@@ -89,38 +87,38 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   }
 
   // 2. Check local database (cache) for existing torrent
+  let cachedTorrent = null;
   try {
-    const cachedTorrent = await prisma.torrent.findFirst({
-      where: {
-        tmdbId: tmdbShowDetails.id.toString(),
-        seasonNumber: seasonNumber,
-        episodeNumber: episodeNumber,
-        realDebridLink: { not: null }, // Ensure we have a valid link
-        // Optional: Filter by languagePreference if stored and preferred
-        // languagePreference: { in: preferredLanguages }
-      },
-      orderBy: {
-        addedAt: 'desc', // Get the most recently added valid link
-      },
-    });
+    const res = await dbQuery(
+      `SELECT * FROM torrents
+       WHERE tmdb_id = $1 AND season_number = $2 AND episode_number = $3 AND real_debrid_link IS NOT NULL
+       ORDER BY added_at DESC
+       LIMIT 1`,
+      [tmdbShowDetails.id.toString(), seasonNumber, episodeNumber]
+    );
+    if (res.rows.length > 0) {
+      cachedTorrent = res.rows[0];
+      // Parse JSONB field if stored as string (pg driver handles it if type is JSONB)
+      if (typeof cachedTorrent.parsed_info_json === 'string') {
+          cachedTorrent.parsed_info_json = JSON.parse(cachedTorrent.parsed_info_json);
+      }
+    }
 
     if (cachedTorrent) {
-      logger.info(`Found cached stream for S${seasonNumber}E${episodeNumber}: ${cachedTorrent.realDebridLink}`);
-      // Re-check Real-Debrid link status (optional but good for freshness)
-      // For simplicity, we directly return. A more robust solution might check link validity.
+      logger.info(`Found cached stream for S${seasonNumber}E${episodeNumber}: ${cachedTorrent.real_debrid_link}`);
       return Promise.resolve({
         streams: [{
           name: `RD Cached | ${tmdbShowTitle} S${seasonNumber}E${episodeNumber}`,
-          description: `Cached link from ${cachedTorrent.addedAt.toISOString().split('T')[0]}`,
-          url: cachedTorrent.realDebridLink,
-          infoHash: cachedTorrent.infohash, // Stremio can use infoHash for some features
+          description: `Cached link from ${new Date(cachedTorrent.added_at).toISOString().split('T')[0]}`,
+          url: cachedTorrent.real_debrid_link,
+          infoHash: cachedTorrent.infohash,
         }]
       });
     }
     logger.info(`No cached stream found for S${seasonNumber}E${episodeNumber} of "${tmdbShowTitle}". Searching Bitmagnet...`);
 
   } catch (dbError) {
-    logger.error('Error querying database:', dbError.message);
+    logger.error('Error querying database for cache:', dbError.message);
     // Continue to search Bitmagnet even if DB lookup fails
   }
 
@@ -139,9 +137,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   const scoredTorrents = await matcher.findBestTorrentMatch(
     bitmagnetResults,
     tmdbEpisodeDetails,
-    tmdbShowTitle,
-    // No pre-fetched files here, matcher will get them if needed
-    // You might want to pass all files from `torrent.files` if Bitmagnet's search query returns them directly
+    tmdbShowTitle
   );
 
   const bestMatchedTorrent = scoredTorrents[0];
@@ -224,52 +220,49 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
     // 6. Persist torrent info to database
     try {
-      await prisma.torrent.create({
-        data: {
-          infohash: selectedTorrent.infoHash,
-          tmdbId: tmdbShowDetails.id.toString(),
-          seasonNumber: seasonNumber,
-          episodeNumber: episodeNumber,
-          torrentName: selectedTorrent.name,
-          parsedInfoJson: selectedTorrent.parsed || {}, // Store the parsed info
-          realDebridTorrentId: rdAddedTorrent.id,
-          realDebridFileId: fileToSelect, // Store the index of the selected file
-          realDebridLink: realDebridDirectLink,
-          addedAt: new Date(),
-          lastCheckedAt: new Date(),
-          languagePreference: preferredLanguages[0] || 'en', // Store first preferred language
-          seeders: selectedTorrent.seeders || 0,
-        },
-      });
-      logger.info('Torrent information persisted to database.');
-    } catch (dbPersistError) {
-      // Log error but don't prevent streaming, as it's a caching issue
-      logger.error('Error persisting torrent to database:', dbPersistError.message);
-      // If it's a unique constraint violation (e.g., infohash already exists), you might want to update instead
-      if (dbPersistError.code === 'P2002') { // Unique constraint violation code for Prisma
-          logger.warn('Torrent infohash already exists. Attempting to update existing record.');
-          try {
-              await prisma.torrent.update({
-                  where: { infohash: selectedTorrent.infoHash },
-                  data: {
-                      tmdbId: tmdbShowDetails.id.toString(),
-                      seasonNumber: seasonNumber,
-                      episodeNumber: episodeNumber,
-                      torrentName: selectedTorrent.name,
-                      parsedInfoJson: selectedTorrent.parsed || {},
-                      realDebridTorrentId: rdAddedTorrent.id,
-                      realDebridFileId: fileToSelect,
-                      realDebridLink: realDebridDirectLink,
-                      lastCheckedAt: new Date(),
-                      languagePreference: preferredLanguages[0] || 'en',
-                      seeders: selectedTorrent.seeders || 0,
-                  }
-              });
-              logger.info('Existing torrent record updated successfully.');
-          } catch (updateError) {
-              logger.error('Failed to update existing torrent record:', updateError.message);
-          }
+      const parsedInfoJsonString = JSON.stringify(selectedTorrent.parsed || {});
+      const tmdbIdStr = tmdbShowDetails.id.toString();
+
+      // Check if infohash already exists to decide between INSERT and UPDATE
+      const existingTorrent = await dbQuery(
+          `SELECT id FROM torrents WHERE infohash = $1`,
+          [selectedTorrent.infoHash]
+      );
+
+      if (existingTorrent.rows.length > 0) {
+          // Update existing record
+          await dbQuery(
+              `UPDATE torrents
+               SET tmdb_id = $1, season_number = $2, episode_number = $3, torrent_name = $4,
+                   parsed_info_json = $5, real_debrid_torrent_id = $6, real_debrid_file_id = $7,
+                   real_debrid_link = $8, last_checked_at = NOW(), language_preference = $9, seeders = $10
+               WHERE infohash = $11`,
+              [
+                  tmdbIdStr, seasonNumber, episodeNumber, selectedTorrent.name,
+                  parsedInfoJsonString, rdAddedTorrent.id, fileToSelect,
+                  realDebridDirectLink, preferredLanguages[0] || 'en', selectedTorrent.seeders || 0,
+                  selectedTorrent.infoHash
+              ]
+          );
+          logger.info('Existing torrent record updated successfully.');
+      } else {
+          // Insert new record
+          await dbQuery(
+              `INSERT INTO torrents (
+                   infohash, tmdb_id, season_number, episode_number, torrent_name,
+                   parsed_info_json, real_debrid_torrent_id, real_debrid_file_id,
+                   real_debrid_link, language_preference, seeders
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              [
+                  selectedTorrent.infoHash, tmdbIdStr, seasonNumber, episodeNumber, selectedTorrent.name,
+                  parsedInfoJsonString, rdAddedTorrent.id, fileToSelect,
+                  realDebridDirectLink, preferredLanguages[0] || 'en', selectedTorrent.seeders || 0
+              ]
+          );
+          logger.info('Torrent information persisted to database.');
       }
+    } catch (dbPersistError) {
+      logger.error('Error persisting torrent to database:', dbPersistError.message);
     }
 
     return Promise.resolve({
@@ -289,6 +282,5 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 });
 
 // Serve the addon
-// The SDK's serveHTTP function expects the AddonInterface instance returned by builder.getInterface().
-serveHTTP(builder.getInterface(), { port: config.port }); // Corrected: Pass the interface and port directly
+serveHTTP(builder.getInterface(), { port: config.port });
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

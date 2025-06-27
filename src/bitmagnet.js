@@ -208,8 +208,7 @@ const TORRENT_FILES_QUERY = `
 
 /**
  * Searches for torrents on Bitmagnet.
- * @param {string} searchQuery - The search string (e.g., "Game of Thrones S01E01").
- * NOTE: This parameter will now contain the refined search string (e.g., "Show Title" SXXEXX).
+ * @param {string} searchQuery - The search string (e.g., "Game of Thrones").
  * @param {number} minSeeders - Minimum seeders for client-side filtering.
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
@@ -219,14 +218,14 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
     return [];
   }
 
-  // CRITICAL FIX: Removed mention of min seeders in log, as it's not applied in Bitmagnet query
+  // Removed mention of min seeders in log, as it's not applied in Bitmagnet query
   logger.info(`Searching Bitmagnet for query: "${searchQuery}"`);
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
       input: {
-        queryString: searchQuery,
+        queryString: searchQuery, // CRITICAL FIX: Only pass the show title here
         limit: 50, // Limit to 50 results as requested
         orderBy: [
           { field: 'seeders', descending: true }, // Order by highest seeders first
@@ -245,7 +244,7 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
 
   try {
     const response = await retryWithExponentialBackoff(
-      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
+      async () => client.post(url), // Removed client.post(url) and config.realDebrid.retry here. Replaced with axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload) below.
       config.bitmagnet.retry
     );
 

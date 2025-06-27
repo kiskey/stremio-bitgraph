@@ -1,28 +1,35 @@
-# Stage 1: Build dependencies
-FROM node:18-alpine AS builder
-WORKDIR /usr/src/app
+# Dockerfile
+# Defines the Docker image for the Stremio Real-Debrid Addon.
+
+# Use an official Node.js runtime as the base image
+FROM node:20-alpine
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Copy package.json and package-lock.json (if exists) to the working directory
+# This allows caching of dependencies
 COPY package*.json ./
-RUN npm install
 
-# Stage 2: Create the final image
-FROM node:18-alpine
-WORKDIR /usr/src/app
+# Install dependencies
+# The --omit=dev flag ensures dev dependencies are not installed in production
+RUN npm install --omit=dev
 
-# Copy dependencies from the builder stage
-COPY --from=builder /usr/src/app/node_modules ./node_modules
+# Copy the rest of the application code to the working directory
+COPY . .
 
-# Copy application source code
-COPY ./src ./src
-COPY ./public ./public
+# Generate Prisma client for the production environment
+# This command connects to your database and generates the Prisma client.
+# Ensure your DATABASE_URL is available during the build stage if your Prisma schema relies on it.
+# If you are only using environment variables at runtime, you can skip this build step
+# and rely on the client being generated during `npm install` (if dev deps are included)
+# or generate it locally before building the image.
+# For production, it's safer to generate here to ensure consistency with the schema.
+RUN npx prisma generate --data-proxy false
 
-# Copy package.json to ensure correct runtime behavior
-COPY package.json .
-
-# Expose the application port
+# Expose the port the app runs on
 EXPOSE 7000
 
-# Set default environment variables (can be overridden)
-ENV PORT=7000
-
-# Start the application
-CMD [ "node", "src/addon.js" ]
+# Command to run the application
+# Use 'npm start' as defined in package.json
+CMD ["npm", "start"]

@@ -289,6 +289,6 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 });
 
 // Serve the addon
-// The SDK's serveHTTP function expects the `builder.get` function directly, which handles all HTTP routes.
-serveHTTP(builder.get); // Corrected: Pass the builder.get function reference
+// The SDK's serveHTTP function expects the AddonInterface instance returned by builder.getInterface().
+serveHTTP(builder.getInterface(), { port: config.port }); // Corrected: Pass the interface and port directly
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

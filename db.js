@@ -21,6 +21,7 @@ function initializePrisma() {
       logger.error('DATABASE_URL is not set in config. Database operations will fail.');
       throw new Error('DATABASE_URL is not configured.');
     }
+    logger.info(`Attempting to connect to database using URL: ${config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@')}`); // Log URL without actual password for security
     prisma = new PrismaClient({
       datasources: {
         db: {
@@ -36,9 +37,11 @@ function initializePrisma() {
         logger.info('Successfully connected to PostgreSQL database.');
       })
       .catch((error) => {
-        logger.error('Failed to connect to PostgreSQL database:', error.message);
-        // Exit the process if database connection fails critically at startup
-        process.exit(1);
+        // IMPORTANT: Log the full error object for detailed debugging
+        logger.error('Failed to connect to PostgreSQL database:', error);
+        // Do NOT exit the process immediately here. The addon might still serve manifest/metadata
+        // but stream requests would fail if they hit the DB.
+        // Prisma Client will automatically retry to connect on subsequent operations if connection is lost.
       });
   }
   return prisma;

@@ -13,7 +13,7 @@ let pool;
 /**
  * Initializes the PostgreSQL connection pool.
  * This function should be called once when the application starts.
- * It also creates the 'torrents' table if it doesn't exist.
+ * It also creates the 'torrents' table if it doesn't exist and adds necessary columns.
  */
 async function initializePg() {
   if (!pool) {
@@ -23,38 +23,21 @@ async function initializePg() {
       throw new Error('DATABASE_URL is not configured.');
     }
 
+    // Append sslmode=disable to connection URL if not already present
+    // This is crucial for local/Docker setups where SSL might not be configured on PG server.
+    const url = new URL(config.database.url);
+    if (!url.searchParams.has('sslmode')) {
+      const separator = url.search ? '&' : '?';
+      config.database.url += `${separator}sslmode=disable`;
+    }
     // Mask password for logging purposes
     const maskedUrl = config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@');
     logger.info(`Attempting to connect to database using URL: ${maskedUrl}`);
 
     pool = new Pool({
       connectionString: config.database.url,
-      ssl: {
-        rejectUnauthorized: false // Adjust for production environments with proper certs
-      }
+      // ssl: false (or rejectUnauthorized: false) is handled by 'sslmode=disable' in connection string
     });
-
-    // CRITICAL FIX: Explicitly disable SSL if the PostgreSQL server does not support it
-    // This is common for local/Docker setups where SSL is not configured.
-    // If you enable SSL on your PostgreSQL server later, you might remove or adjust this.
-    const url = new URL(config.database.url);
-    if (!url.searchParams.has('sslmode')) { // Only add if sslmode is not already specified in the URL
-      // Append a parameter to the connection string to disable SSL
-      // The `pg` library respects `sslmode=disable`
-      const separator = url.search ? '&' : '?';
-      config.database.url += `${separator}sslmode=disable`;
-      logger.info(`Appended 'sslmode=disable' to connection URL: ${config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@')}`);
-    }
-
-    pool = new Pool({
-      connectionString: config.database.url,
-      // The `ssl: false` directly passed in the config object
-      // is another way to disable SSL, equivalent to sslmode=disable in URL.
-      // We will rely on the `sslmode=disable` in the connection string to be explicit.
-      // If you prefer, you can use: `ssl: false` directly here, and remove the URL modification.
-      // For maximal clarity, adding `sslmode=disable` to the URL is often preferred for logging/debugging.
-    });
-
 
     try {
       // Test the connection
@@ -74,6 +57,7 @@ async function initializePg() {
           real_debrid_torrent_id TEXT UNIQUE NOT NULL,
           real_debrid_file_id TEXT,
           real_debrid_link TEXT NOT NULL,
+          real_debrid_info_json JSONB, -- NEW COLUMN: Stores the full Real-Debrid torrent info JSON
           added_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
           language_preference TEXT,
@@ -88,8 +72,20 @@ async function initializePg() {
       `);
       logger.info('Ensured "torrents" table exists in the database.');
 
+      // CRITICAL FIX: Add real_debrid_info_json column if it doesn't exist (for existing databases)
+      await pool.query(`
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_info_json') THEN
+                ALTER TABLE torrents ADD COLUMN real_debrid_info_json JSONB;
+                RAISE NOTICE 'Added real_debrid_info_json column to torrents table.';
+            END IF;
+        END $$;
+      `);
+      logger.info('Ensured real_debrid_info_json column exists in "torrents" table.');
+
     } catch (error) {
-      logger.error('Failed to connect to PostgreSQL database or create table:', error);
+      logger.error('Failed to connect to PostgreSQL database or ensure schema:', error);
       // Do not exit the process here, allow app to start, but DB ops will fail
     }
   }

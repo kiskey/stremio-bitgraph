@@ -383,9 +383,12 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
             }
 
             // Now get the specific link after selection
-            const rawRealDebridLink = torrentInfoAfterAdd.links[fileToSelect === 'all' ? 0 : parseInt(fileToSelect, 10)];
+            // Ensure the link index is valid before accessing
+            const linkIndex = (fileToSelect === 'all' || isNaN(parseInt(fileToSelect, 10))) ? 0 : parseInt(fileToSelect, 10);
+            const rawRealDebridLink = torrentInfoAfterAdd.links[linkIndex];
+            
             if (!rawRealDebridLink) {
-                logger.error(`No raw Real-Debrid link found for selected file index ${fileToSelect} from torrent info.`);
+                logger.error(`No raw Real-Debrid link found for selected file index ${fileToSelect} from torrent info or index ${linkIndex} is out of bounds.`);
                 return Promise.resolve({ streams: potentialStreams });
             }
 

@@ -4,8 +4,8 @@
  * Initializes the Stremio addon, defines stream handlers, and orchestrates the content delivery.
  */
 
-const { serveHTTP, get } = require('stremio-addon-sdk'); // Corrected destructuring
-const addonBuilder = require('stremio-addon-sdk');
+const { serveHTTP, get } = require('stremio-addon-sdk'); // Corrected package name
+const addonBuilder = require('stremio-addon-sdk'); // Corrected package name
 const manifest = require('./manifest');
 const config = require('./config');
 const { initializePrisma, getPrismaClient } = require('./db');

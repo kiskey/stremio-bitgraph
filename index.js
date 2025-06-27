@@ -251,9 +251,8 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   // --- Proceed with Bitmagnet Search for new torrents if necessary ---
   logger.info(`Proceeding to search Bitmagnet for new torrents.`);
 
-  // Construct query string based on documentation for better targeting
-  // Quoted title, unquoted season/episode part
-  const bitmagnetSearchQuery = `"${tmdbShowTitle}" S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
+  // CRITICAL FIX: Construct query string using ONLY the show title for broader search
+  const bitmagnetSearchQuery = `"${tmdbShowTitle}"`;
 
   let bitmagnetResults = [];
   try {
@@ -319,7 +318,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
             if (existingRdTorrentForInfohash) {
                 rdAddedTorrentId = existingRdTorrentForInfohash;
-                if (!torrentInfoAfterAdd || torrentInfoAfterAdd.status !== 'downloaded' && torrentInfoAfterAdd.status !== 'finished') {
+                if (!torrentInfoAfterAdd || (torrentInfoAfterAdd.status !== 'downloaded' && torrentInfoAfterAdd.status !== 'finished')) {
                     // Re-poll if existing info is missing or not yet downloaded
                     logger.info(`Re-fetching latest info for existing Real-Debrid torrent ID: ${rdAddedTorrentId}`);
                     torrentInfoAfterAdd = await realDebrid.pollForTorrentCompletion(realDebridApiKey, rdAddedTorrentId);
@@ -460,15 +459,16 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
               infoHash: selectedTorrentInfoHash,
               isCached: false // New streams are not initially from cache
             });
-        } catch (realDebridFlowError) {
+        } catch (realDebridFlowError) { // THIS CATCH CORRESPONDS TO THE TRY BLOCK ABOVE
           logger.error('Error during Real-Debrid torrent processing flow (add/select/unrestrict):', realDebridFlowError.message, realDebridFlowError.stack, realDebridFlowError);
         }
-    }
-  }
+    } // This curly brace closes the 'else' block for !selectedTorrentMagnetUri
+  } // This curly brace closes the 'if (bestMatchedTorrent && bestMatchedTorrent.score > -Infinity)' block
+
 
   logger.info(`Returning ${potentialStreams.length} stream(s) to Stremio.`);
   return Promise.resolve({ streams: potentialStreams });
-});
+}); // This curly brace closes the builder.defineStreamHandler async function
 
 serveHTTP(builder.getInterface(), { port: config.port });
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

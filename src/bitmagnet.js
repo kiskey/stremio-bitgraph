@@ -40,22 +40,21 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     seeders
     leechers
     publishedAt
-    # Fetch direct fields from TorrentContent
-    magnetUri # Corrected: Use magnetUri as per schema, not magnetLink
-    files { # These fields are directly available on TorrentContent
+    magnetUri 
+    files { 
       path
       size
       index
       extension
       fileType
     }
-    torrent { # Nested torrent object for fields like size, name, tagNames, fileType
+    torrent { 
       name
       size
       fileType
       tagNames
     }
-    content { # Nested content object for richer metadata
+    content { 
       source
       id
       title
@@ -84,10 +83,10 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
     torrentContent {
       search(input: $input) {
         items {
-          ...TorrentContentFields # Use the fragment here
+          ...TorrentContentFields 
         }
-        totalCount # Added as per user's working model
-        hasNextPage # Added as per user's working model
+        totalCount 
+        hasNextPage 
       }
     }
   }
@@ -138,14 +137,13 @@ async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = 
       input: {
         queryString: searchQuery,
         orderBy: [
-          { field: 'seeders', descending: true } // 'seeders' (lowercase) is correct from schema
+          { field: 'seeders', descending: true } 
         ],
         facets: {
           contentType: {
-            filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
+            filter: ['tv_show'] 
           }
         }
-        // Removed language facet filter as per requirement to handle client-side
       },
     },
   };

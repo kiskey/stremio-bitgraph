@@ -251,7 +251,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   // --- Proceed with Bitmagnet Search for new torrents if necessary ---
   logger.info(`Proceeding to search Bitmagnet for new torrents.`);
 
-  // CRITICAL FIX: Construct query string based on documentation for better targeting
+  // Construct query string based on documentation for better targeting
   // Quoted title, unquoted season/episode part
   const bitmagnetSearchQuery = `"${tmdbShowTitle}" S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
 

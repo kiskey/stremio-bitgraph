@@ -4,16 +4,16 @@
  * Initializes the Stremio addon, defines stream handlers, and orchestrates the content delivery.
  */
 
-const { serveHTTP, get };
+const { serveHTTP, get } = require('stremio-addon-sdk'); // Corrected destructuring
 const addonBuilder = require('stremio-addon-sdk');
 const manifest = require('./manifest');
 const config = require('./config');
 const { initializePrisma, getPrismaClient } = require('./db');
-const tmdb = require('./src/tmdb');
-const bitmagnet = require('./src/bitmagnet');
-const realDebrid = require('./src/realdebrid');
-const matcher = require('./src/matcher');
-const { logger } = require('./src/utils');
+const tmdb = require('./src/tmdb'); // Correct path for tmdb
+const bitmagnet = require('./src/bitmagnet'); // Correct path for bitmagnet
+const realDebrid = require('./src/realdebrid'); // Correct path for realdebrid
+const matcher = require('./src/matcher'); // Correct path for matcher
+const { logger } = require('./src/utils'); // Correct path for utils
 
 // Initialize Prisma Client on startup
 initializePrisma();
@@ -65,13 +65,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
     // Or, if using a pre-indexed mapping (not implemented here), it would be faster.
     // For now, we'll assume a direct lookup if IMDb maps to a TMDB show.
     // In a real scenario, you'd likely fetch this from a mapping service or a cached entry.
-    // For simplicity, we'll try to get show details and then iterate seasons/episodes
-    // The provided research mentions TMDB /tv/{series_id}, but Stremio provides IMDb ID.
-    // We need to convert IMDb to TMDB. This often requires a separate search endpoint or a mapping DB.
-    // For now, let's assume `getTvShowDetails` can take IMDb and map internally, or use a cached mapping.
-    // If not, a TMDB search by IMDb ID is needed first: `GET /3/find/{external_id}` with `external_source=imdb_id`
-    // For this example, let's simplify and use TMDB's `external_ids` or assume direct TMDB ID is implied by how Stremio sends it.
-    // The spec says `idPrefixes: ['tt']` means Stremio sends IMDb IDs. So we need to use TMDB's find endpoint.
+    // For this example, we'll use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
 
     const tmdbFindResponse = await tmdb.get(`https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&api_key=${config.tmdb.apiKey}`);
     if (tmdbFindResponse && tmdbFindResponse.tv_results && tmdbFindResponse.tv_results.length > 0) {
@@ -294,5 +288,5 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 });
 
 // Serve the addon
-serveHTTP(builder.get = () => builder);
+serveHTTP(builder.getManifest()); // Use builder.getManifest() to get the manifest directly
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

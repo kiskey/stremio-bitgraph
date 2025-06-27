@@ -10,51 +10,84 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
-// Removed BITMAGNET_LANGUAGE_MAP as language filtering will be handled client-side.
+/**
+ * GraphQL fragment for common TorrentContent fields.
+ * This aligns with the user's provided "working" query model and the Bitmagnet schema.
+ */
+const TORRENT_CONTENT_FIELDS_FRAGMENT = `
+  fragment TorrentContentFields on TorrentContent {
+    id
+    infoHash
+    contentType
+    title
+    languages {
+      id
+      name
+    }
+    episodes {
+      label
+      seasons {
+        season
+        episodes
+      }
+    }
+    video3d
+    videoCodec
+    videoModifier
+    videoResolution
+    videoSource
+    releaseGroup
+    seeders
+    leechers
+    publishedAt
+    # Fetch direct fields from TorrentContent
+    magnetUri # Corrected: Use magnetUri as per schema, not magnetLink
+    files { # These fields are directly available on TorrentContent
+      path
+      size
+      index
+      extension
+      fileType
+    }
+    torrent { # Nested torrent object for fields like size, name, tagNames, fileType
+      name
+      size
+      fileType
+      tagNames
+    }
+    content { # Nested content object for richer metadata
+      source
+      id
+      title
+      releaseDate
+      releaseYear
+      runtime
+      overview
+      externalLinks {
+        url
+      }
+      originalLanguage {
+        id
+        name
+      }
+    }
+  }
+`;
 
 /**
  * GraphQL query for searching torrent content.
- * Adjusted to match Bitmagnet's `torrentContent { search(input: $input) }` structure.
+ * Uses the fragment and includes totalCount and hasNextPage.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
+  ${TORRENT_CONTENT_FIELDS_FRAGMENT}
   query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
     torrentContent {
       search(input: $input) {
         items {
-          infoHash
-          name
-          size
-          extension
-          contentType
-          magnetLink
-          files {
-            path
-            size
-            index
-          }
-          content {
-            type
-            title
-            releaseDate
-            season
-            episode
-            seasonEpisode
-            originalTitle
-            imdbId
-            tmdbId
-            tvdbId
-            episodes {
-              season
-              episode
-            }
-          }
-          seeders # Directly available on TorrentContent type
-          leechers # Directly available on TorrentContent type
-          languages { # Assuming 'languages' field is available for content
-            id
-            name
-          }
+          ...TorrentContentFields # Use the fragment here
         }
+        totalCount # Added as per user's working model
+        hasNextPage # Added as per user's working model
       }
     }
   }
@@ -98,7 +131,6 @@ async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = 
   }
 
   logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
-  // Removed logging of preferred languages here as they are not used in the Bitmagnet query
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
@@ -113,7 +145,7 @@ async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = 
             filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
           }
         }
-        // Removed language facet filter as per requirement
+        // Removed language facet filter as per requirement to handle client-side
       },
     },
   };

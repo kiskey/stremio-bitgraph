@@ -10,12 +10,11 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^16.6.0",
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "graphql-request": "^5.2.0",
-    "node-fetch": "^2.7.0",
-    "parse-torrent-title": "^1.4.0",
-    "stremio-addon-sdk": "^1.6.10"
-  }
+  "dotenv": "^16.3.1",
+  "graphql-request": "^5.2.0",
+  "node-fetch": "^2.7.0",
+  "parse-torrent-title": "^1.11.0",
+  "serve-http": "^3.1.0",
+  "stremio-addon-sdk": "^1.6.9"
+}
 }

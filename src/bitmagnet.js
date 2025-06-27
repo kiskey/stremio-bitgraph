@@ -244,7 +244,8 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
 
   try {
     const response = await retryWithExponentialBackoff(
-      async () => client.post(url), // Removed client.post(url) and config.realDebrid.retry here. Replaced with axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload) below.
+      // CRITICAL FIX: Corrected the axios.post call here
+      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
       config.bitmagnet.retry
     );
 

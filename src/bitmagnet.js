@@ -10,8 +10,6 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
-// No longer need BITMAGNET_LANGUAGE_MAP as language filtering is client-side.
-
 /**
  * Fragment for TorrentContent fields.
  * Derived from the provided 'app_log.txt' which includes TorrentContent, Torrent, and Content fragments.
@@ -150,6 +148,7 @@ const TORRENT_CONTENT_SEARCH_RESULT_FRAGMENT = `
 /**
  * GraphQL query for searching torrent content.
  * Directly uses the TorrentContentSearchResult fragment.
+ * Includes orderBy for seeders and publishedAt, and limit for results.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
   ${TORRENT_CONTENT_SEARCH_RESULT_FRAGMENT}
@@ -213,21 +212,23 @@ const TORRENT_FILES_QUERY = `
  * @param {number} minSeeders - Minimum seeders to filter results.
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
-async function searchTorrents(searchQuery, minSeeders = 1) {
+async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferredLanguages from signature here, but passed from index.js
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
     logger.error('Bitmagnet GraphQL endpoint is not configured.');
     return [];
   }
 
-  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
+  logger.info(`Searching Bitmagnet for query: "${searchQuery}" with min seeders: ${minSeeders}`);
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
       input: {
         queryString: searchQuery,
+        limit: 50, // CRITICAL FIX: Limit to 50 results as requested
         orderBy: [
-          { field: 'seeders', descending: true } // 'seeders' (lowercase) is correct from schema
+          { field: 'seeders', descending: true }, // Order by highest seeders first
+          { field: 'published_at', descending: true } // Then by most recent published date
         ],
         facets: {
           contentType: {
@@ -247,10 +248,10 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
       config.bitmagnet.retry
     );
 
-    // Navigate through the response path as per the updated schema
     const torrents = response.data.data?.torrentContent?.search?.items || [];
-    logger.debug(`Bitmagnet search found ${torrents.length} torrents.`);
+    logger.info(`Bitmagnet returned ${torrents.length} potential torrents for "${searchQuery}".`); // Changed to info level
     logger.debug(`Bitmagnet raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
+
 
     // Client-side filtering for minSeeders (still good practice)
     return torrents.filter(torrent => torrent.seeders >= minSeeders);

@@ -25,23 +25,28 @@ const builder = new addonBuilder(manifest);
  * @param {object} parsedInfo - Parsed torrent/file info from parse-torrent-title.
  * @param {object} torrentItem - The original Bitmagnet torrent item.
  * @param {Array<string>} preferredLanguages - User's preferred languages.
- * @returns {object} { title, description }
+ * @returns {object} { streamTitle, streamDescription }
  */
 function formatStreamMetadata(parsedInfo, torrentItem, preferredLanguages) {
     let quality = parsedInfo.resolution || parsedInfo.quality || 'Unknown Quality';
     if (parsedInfo.hdr) quality += ' HDR';
     if (parsedInfo.dolbyvision) quality += ' DV';
-    if (parsedInfo.codec) quality += ` (${parsedInfo.codec})`;
+    if (parsedInfo.codec) quality += ` (${parsedInfo.codec.toUpperCase()})`; // Make codec uppercase
 
     const seeders = torrentItem.seeders || 0;
 
     let language = 'Unknown Language';
-    // Prioritize language from Bitmagnet's content metadata
+    // Prioritize language from Bitmagnet's content metadata (more reliable)
     if (torrentItem.languages && torrentItem.languages.length > 0) {
         language = torrentItem.languages[0].name || torrentItem.languages[0].id;
+        // Map common language codes to more readable names
+        if (language === 'en') language = 'English';
+        if (language === 'tam') language = 'Tamil';
     } else if (parsedInfo.languages && parsedInfo.languages.length > 0) {
         // Fallback to ptt parsed language
         language = parsedInfo.languages[0];
+        if (language === 'eng') language = 'English'; // ptt might return 'eng'
+        if (language === 'hin') language = 'Hindi'; // example
     } else {
         // As a last resort, if preferred languages include English, assume English
         if (preferredLanguages.includes('en') || preferredLanguages.includes('eng')) {
@@ -49,7 +54,7 @@ function formatStreamMetadata(parsedInfo, torrentItem, preferredLanguages) {
         }
     }
 
-    // Determine if it's a season pack or specific episode based on parsedInfo
+    // Determine episode/season info for the description
     let episodeInfo = '';
     if (parsedInfo.season && parsedInfo.episode) {
         if (Array.isArray(parsedInfo.episode)) {
@@ -62,12 +67,15 @@ function formatStreamMetadata(parsedInfo, torrentItem, preferredLanguages) {
         }
     } else if (parsedInfo.season && (parsedInfo.isCompleteSeason || parsedInfo.seasonpack)) {
         episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')} (Pack)`;
-    } else if (parsedInfo.season) { // Just a season without specific episode/pack flag
-        episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}`;
+    } else if (parsedInfo.season) { // Just a season without specific episode/pack flag, assume pack
+        episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')} (Potential Pack)`;
+    } else { // No season/episode info in parsed torrent/file name
+        episodeInfo = 'Episode Match'; // It's a file match, but we don't have SxE info from its name
     }
 
-    const streamTitle = `${episodeInfo ? episodeInfo + ' | ' : ''}${quality}`;
-    const streamDescription = `Seeders: ${seeders} | Lang: ${language}`;
+
+    const streamTitle = `${quality}`; // Quality only for the 'BMG - RD - Quality' name
+    const streamDescription = `${episodeInfo} | Seeders: ${seeders} | Lang: ${language}`;
 
     return { streamTitle, streamDescription };
 }
@@ -251,6 +259,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
 // --- Define the custom HTTP handler for on-demand Real-Debrid processing ---
 // This acts as a proxy that Stremio will hit when a user selects a deferred stream.
+// Changed resource name from 'stream' to 'realdebrid_proxy' to avoid conflict
 builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) => {
   // Parse the custom URL path: /realdebrid_proxy/rd/:infoHash/:fileIndex/:tmdbId/:seasonNumber/:episodeNumber
   const pathParts = request.path.split('/');

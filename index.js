@@ -5,7 +5,7 @@
  */
 
 // Corrected: addonBuilder is likely a named export along with serveHTTP and get
-const { serveHTTP, get, addonBuilder } = require('stremio-addon-sdk'); 
+const { serveHTTP, get, addonBuilder } = require('stremio-addon-sdk');
 const manifest = require('./manifest');
 const config = require('./config');
 const { initializePrisma, getPrismaClient } = require('./db');
@@ -68,9 +68,23 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
     // For this example, we'll use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
 
     // Using tmdb.get for a direct URL fetch. This will make an HTTP GET request to the specified URL.
-    const tmdbFindResponse = await tmdb.get(`https://api.themoviedb.org/3/find/${imdbId}?external_source=imdb_id&api_key=${config.tmdb.apiKey}`);
-    if (tmdbFindResponse && tmdbFindResponse.tv_results && tmdbFindResponse.tv_results.length > 0) {
-      tmdbShowDetails = tmdbFindResponse.tv_results[0];
+    // This `tmdb.get` method does not exist in the provided `tmdb.js` file. It needs to be replaced
+    // with a call to axios directly, or a helper function within `tmdb.js`.
+    // Let's assume `tmdb.js` has a generic `get` function or we call axios here.
+    // Given the `tmdb.js` provided, we have specific functions like `getTvShowDetails`.
+    // We need to implement a `find` method in `tmdb.js` or make a direct `axios` call here.
+    // For now, I'll modify tmdb.js to include a `findExternalId` method.
+    // Reverting `tmdb.get` to `axios.get` for direct external ID search.
+
+    const tmdbFindResponse = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}`, {
+      params: {
+        external_source: 'imdb_id',
+        api_key: config.tmdb.apiKey,
+      }
+    });
+
+    if (tmdbFindResponse.data && tmdbFindResponse.data.tv_results && tmdbFindResponse.data.tv_results.length > 0) {
+      tmdbShowDetails = tmdbFindResponse.data.tv_results[0];
       tmdbShowTitle = tmdbShowDetails.name;
     } else {
       logger.error(`Could not find TMDB show details for IMDb ID: ${imdbId}`);
@@ -289,5 +303,6 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 });
 
 // Serve the addon
-serveHTTP(builder.getManifest()); // Use builder.getManifest() to get the manifest directly
+// The SDK's serveHTTP function expects the builder instance directly, or builder.get, builder.manifest
+serveHTTP(builder); // Corrected: Pass the builder instance directly
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

@@ -14,6 +14,7 @@ const bitmagnet = require('./src/bitmagnet');
 const realDebrid = require('./src/realdebrid');
 const matcher = require('./src/matcher');
 const { logger } = require('./src/utils');
+const axios = require('axios'); // Import axios for direct TMDB find call
 
 // Initialize Prisma Client on startup
 initializePrisma();
@@ -60,22 +61,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 
   try {
     // 1. Get TMDB show details to find TMDB ID for the IMDb ID
-    // Stremio's IMDb ID needs to be mapped to TMDB ID for TMDB API calls
-    // A simple direct lookup for TMDB show details using a search is often needed first
-    // Or, if using a pre-indexed mapping (not implemented here), it would be faster.
-    // For now, we'll assume a direct lookup if IMDb maps to a TMDB show.
-    // In a real scenario, you'd likely fetch this from a mapping service or a cached entry.
-    // For this example, we'll use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
-
-    // Using tmdb.get for a direct URL fetch. This will make an HTTP GET request to the specified URL.
-    // This `tmdb.get` method does not exist in the provided `tmdb.js` file. It needs to be replaced
-    // with a call to axios directly, or a helper function within `tmdb.js`.
-    // Let's assume `tmdb.js` has a generic `get` function or we call axios here.
-    // Given the `tmdb.js` provided, we have specific functions like `getTvShowDetails`.
-    // We need to implement a `find` method in `tmdb.js` or make a direct `axios` call here.
-    // For now, I'll modify tmdb.js to include a `findExternalId` method.
-    // Reverting `tmdb.get` to `axios.get` for direct external ID search.
-
+    // Use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
     const tmdbFindResponse = await axios.get(`https://api.themoviedb.org/3/find/${imdbId}`, {
       params: {
         external_source: 'imdb_id',
@@ -303,6 +289,7 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 });
 
 // Serve the addon
-// The SDK's serveHTTP function expects the builder instance directly, or builder.get, builder.manifest
-serveHTTP(builder); // Corrected: Pass the builder instance directly
+// The SDK's serveHTTP function expects the builder instance directly, or builder.get, builder.manifest, or builder.getReader()
+// getReader() returns the AddonInterface instance expected by serveHTTP.
+serveHTTP(builder.getReader()); // Corrected: Pass the AddonInterface instance using getReader()
 logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);

@@ -19,6 +19,8 @@ module.exports = {
     configurable: true, // Indicates that the addon has configurable settings
     random: true // Can return random content, though less relevant for specific episode lookups
   },
+  // Added an empty catalogs array to satisfy the Stremio Addon SDK linter
+  catalogs: [], 
   // Configuration options for the addon, presented to the user during installation
   config: [
     {

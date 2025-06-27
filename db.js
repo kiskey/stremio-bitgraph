@@ -34,6 +34,28 @@ async function initializePg() {
       }
     });
 
+    // CRITICAL FIX: Explicitly disable SSL if the PostgreSQL server does not support it
+    // This is common for local/Docker setups where SSL is not configured.
+    // If you enable SSL on your PostgreSQL server later, you might remove or adjust this.
+    const url = new URL(config.database.url);
+    if (!url.searchParams.has('sslmode')) { // Only add if sslmode is not already specified in the URL
+      // Append a parameter to the connection string to disable SSL
+      // The `pg` library respects `sslmode=disable`
+      const separator = url.search ? '&' : '?';
+      config.database.url += `${separator}sslmode=disable`;
+      logger.info(`Appended 'sslmode=disable' to connection URL: ${config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@')}`);
+    }
+
+    pool = new Pool({
+      connectionString: config.database.url,
+      // The `ssl: false` directly passed in the config object
+      // is another way to disable SSL, equivalent to sslmode=disable in URL.
+      // We will rely on the `sslmode=disable` in the connection string to be explicit.
+      // If you prefer, you can use: `ssl: false` directly here, and remove the URL modification.
+      // For maximal clarity, adding `sslmode=disable` to the URL is often preferred for logging/debugging.
+    });
+
+
     try {
       // Test the connection
       await pool.query('SELECT NOW()');

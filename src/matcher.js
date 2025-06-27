@@ -5,7 +5,7 @@
  * to find the best match for a given TV show episode.
  */
 
-const parse = require('parse-torrent-title');
+const ptt = require('parse-torrent-title'); // CRITICAL FIX: Correctly import as 'ptt'
 const stringSimilarity = require('string-similarity');
 const { logger } = require('./utils');
 const config = require('../config');
@@ -25,7 +25,8 @@ function parseTorrentInfo(torrentName) {
     return null;
   }
   try {
-    const parsed = parse(torrentName);
+    // CRITICAL FIX: Call ptt.parse() instead of parse()
+    const parsed = ptt.parse(torrentName);
     // Add original name for debugging
     parsed.originalName = torrentName;
     return parsed;

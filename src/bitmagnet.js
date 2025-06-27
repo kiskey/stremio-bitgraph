@@ -10,57 +10,64 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
+// Map common language codes to Bitmagnet's Language enum (case-insensitive for input)
+// CRITICAL FIX: Ensure mapping to LOWERCASE enum values as per Bitmagnet's schema (e.g., 'en', 'ta')
+const BITMAGNET_LANGUAGE_MAP = {
+  'en': 'en', 'eng': 'en',
+  'fr': 'fr', 'fre': 'fr',
+  'es': 'es', 'spa': 'es',
+  'de': 'de', 'ger': 'de',
+  'it': 'it', 'ita': 'it',
+  'ru': 'ru', 'rus': 'ru',
+  'ta': 'ta', // Assuming 'ta' as the enum value for Tamil
+  'tamil': 'ta', // User input 'tamil' maps to 'ta'
+  // Add more mappings as discovered or required
+};
+
 /**
  * GraphQL query for searching torrent content.
- * Adjust fields as needed based on Bitmagnet's actual schema.
+ * Adjusted to match Bitmagnet's `torrentContent { search(input: $input) }` structure.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
-  query TorrentContentSearch($query: String!, $orderBy: [TorrentContentOrderByWithNulls!]!) {
-    torrentContentSearch(query: $query, orderBy: $orderBy, type: TV_SERIES) {
-      items {
-        infoHash
-        name
-        size
-        extension
-        contentType
-        releaseDate
-        magnetLink
-        files {
-          path
-          size
-          index
-        }
-        source {
-          source
-          url
+  query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
+    torrentContent {
+      search(input: $input) {
+        items {
           infoHash
-          publishedAt
-          torrentId
-        }
-        content {
-          type
-          title
-          releaseDate
-          season
-          episode
-          seasonEpisode
-          originalTitle
-          imdbId
-          tmdbId
-          tvdbId
-          episodes {
+          name
+          size
+          extension
+          contentType
+          magnetLink
+          files {
+            path
+            size
+            index
+          }
+          content {
+            type
+            title
+            releaseDate
             season
             episode
+            seasonEpisode
+            originalTitle
+            imdbId
+            tmdbId
+            tvdbId
+            episodes {
+              season
+              episode
+            }
+          }
+          seeders # Directly available on TorrentContent type
+          leechers # Directly available on TorrentContent type
+          languages { # Assuming 'languages' field is available for content
+            id
+            name
           }
         }
-        # Assuming these exist based on schema examples or introspection
-        # If not, remove them or get them via another query
-        # tags {
-        #   tag
-        # }
-        # languages {
-        #   language
-        # }
+        # Removed TorrentContentSearchResult fragment spread as it's not needed for inline fields
       }
     }
   }
@@ -68,14 +75,21 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
 
 /**
  * GraphQL query for getting files within a specific torrent.
+ * Adjusted to match Bitmagnet's `torrent { files(input: $input) }` structure.
  */
 const TORRENT_FILES_QUERY = `
-  query TorrentFiles($infoHash: String!) {
-    torrent(infoHash: $infoHash) {
-      files {
-        path
-        size
-        index
+  query TorrentFiles($input: TorrentFilesQueryInput!) {
+    torrent {
+      files(input: $input) {
+        items {
+          infoHash
+          index
+          path
+          extension
+          fileType
+          size
+        }
+        # Removed TorrentFilesQueryResult fragment spread
       }
     }
   }
@@ -86,29 +100,46 @@ const TORRENT_FILES_QUERY = `
  * Searches for torrents on Bitmagnet.
  * @param {string} searchQuery - The search string (e.g., "Game of Thrones S01E01").
  * @param {number} minSeeders - Minimum seeders to filter results.
+ * @param {Array<string>} preferredLanguages - Array of preferred language codes (e.g., ['en', 'fr']).
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
-async function searchTorrents(searchQuery, minSeeders = 1) {
+async function searchTorrents(searchQuery, minSeeders = 1, preferredLanguages = ['en']) {
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
     logger.error('Bitmagnet GraphQL endpoint is not configured.');
     return [];
   }
 
-  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
+  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}, languages: ${preferredLanguages.join(', ')}`);
+
+  const mappedLanguages = preferredLanguages
+    .map(lang => BITMAGNET_LANGUAGE_MAP[lang.toLowerCase()])
+    .filter(Boolean); // Filter out any undefined/null values (languages not in map)
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
-      query: searchQuery,
-      orderBy: [
-        { field: 'SEEDERS', direction: 'DESC' }
-      ],
-      // Bitmagnet's text search guide allows `min_seeders` in query string
-      // If `minSeeders` is a direct filter in GraphQL, it would be here.
-      // Assuming it's part of the `TorrentContentSearch` filter arguments.
-      // If not, client-side filtering would be needed after results.
+      input: {
+        queryString: searchQuery,
+        orderBy: [
+          { field: 'seeders', descending: true } // 'seeders' (lowercase) is correct from schema
+        ],
+        facets: {
+          contentType: {
+            filter: ['tv_show'] // CRITICAL FIX: Changed to 'tv_show' (lowercase) to match enum
+          }
+        }
+      },
     },
   };
+
+  // Add language filter if mapped languages are available
+  if (mappedLanguages.length > 0) {
+    payload.variables.input.facets.language = {
+      filter: mappedLanguages
+    };
+    logger.debug(`Applying language filter to Bitmagnet query: ${mappedLanguages.join(', ')}`);
+  }
+
 
   logger.debug(`Bitmagnet GraphQL Request Payload: ${JSON.stringify(payload, null, 2)}`); // Log the full payload
 
@@ -118,25 +149,28 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
       config.bitmagnet.retry
     );
 
-    // Bitmagnet's schema might be different. Adjust response parsing if needed.
-    const torrents = response.data.data?.torrentContentSearch?.items || [];
+    // Bitmagnet's schema defines `torrentContent.search.items` for results
+    const torrents = response.data.data?.torrentContent?.search?.items || [];
     logger.debug(`Bitmagnet search found ${torrents.length} torrents.`);
+    logger.debug(`Bitmagnet raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
 
-    // Client-side filtering for minSeeders if not directly supported by Bitmagnet GraphQL query
+
+    // Client-side filtering for minSeeders (still good practice)
     return torrents.filter(torrent => torrent.seeders >= minSeeders);
 
   } catch (error) {
     logger.error(`Error searching Bitmagnet for "${searchQuery}":`, error.message);
     if (error.response) {
       logger.error('Bitmagnet HTTP Response Status:', error.response.status);
+      logger.error('Bitmagnet HTTP Response Headers:', error.response.headers);
       logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+      if (error.response.data && error.response.data.errors) {
+        logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2)); // Log GraphQL specific errors
+      }
     } else if (error.request) {
       logger.error('Bitmagnet Request was made but no response was received:', error.request);
     } else {
       logger.error('Error setting up Bitmagnet request:', error.message);
-    }
-    if (error.response && error.response.data && error.response.data.errors) {
-      logger.error('Bitmagnet GraphQL Errors:', JSON.stringify(error.response.data.errors, null, 2));
     }
     return [];
   }
@@ -158,7 +192,9 @@ async function getTorrentFiles(infoHash) {
   const payload = {
     query: TORRENT_FILES_QUERY,
     variables: {
-      infoHash: infoHash,
+      input: { // Wrap infoHash in an 'input' object
+        infoHashes: [infoHash], // Expects an array of infoHashes
+      },
     },
   };
   logger.debug(`Bitmagnet Torrent Files Request Payload: ${JSON.stringify(payload, null, 2)}`);
@@ -169,26 +205,29 @@ async function getTorrentFiles(infoHash) {
       config.bitmagnet.retry
     );
 
-    const files = response.data.data?.torrent?.files || [];
+    // Access files through torrent.files.items based on the new schema structure
+    const files = response.data.data?.torrent?.files?.items || [];
     logger.debug(`Found ${files.length} files for infohash ${infoHash}.`);
+    logger.debug(`Bitmagnet torrent files raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
+
     return files;
   } catch (error) {
     logger.error(`Error fetching torrent files for ${infoHash} from Bitmagnet: ${error.message}`);
     if (error.response) {
       logger.error('Bitmagnet HTTP Response Status:', error.response.status);
+      logger.error('Bitmagnet HTTP Response Headers:', error.response.headers);
       logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+      if (error.response.data && error.response.data.errors) {
+        logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2));
+      }
     } else if (error.request) {
       logger.error('Bitmagnet Request was made but no response was received:', error.request);
     } else {
       logger.error('Error setting up Bitmagnet torrent files request:', error.message);
     }
-    if (error.response && error.response.data && error.response.data.errors) {
-      logger.error('Bitmagnet GraphQL Errors:', JSON.stringify(error.response.data.errors, null, 2));
-    }
     return [];
   }
 }
-
 
 module.exports = {
   searchTorrents,

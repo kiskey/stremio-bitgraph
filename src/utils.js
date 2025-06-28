@@ -25,24 +25,27 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- FINAL, ROBUST SANITIZATION FUNCTION ---
+// --- FINAL, PRODUCTION-READY SANITIZATION FUNCTION ---
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove specific known noisy prefixes first.
-    sanitized = sanitized.replace(/^www\.\S+\.\w+\s*-\s*/i, '');
+    // 1. Remove URLs and email addresses
+    sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
 
-    // 2. Remove CJK characters, leaving surrounding text.
-    sanitized = sanitized.replace(/[\u3000-\u9faf\u3400-\u4dbf【】]/g, ' ');
+    // 2. Remove CJK characters and symbols. This is a more comprehensive range.
+    sanitized = sanitized.replace(/[\u2E80-\u9FFF【】]/g, ' ');
 
-    // 3. Remove bracketed URLs or other junk, but be less greedy.
-    // This targets brackets containing common TLDs or keywords like "release".
-    sanitized = sanitized.replace(/\[\s*(www\.\S+|\S+\.(com|net|org|info))\s*\]/gi, ' ');
+    // 3. Remove bracketed content that is likely metadata (e.g., [10集], [ExYuSubs])
+    // This looks for brackets containing mostly non-alphanumeric characters, or common keywords.
+    sanitized = sanitized.replace(/\[([^a-zA-Z0-9]*|subs?|web|dl|rip|hd|x264|x265|h264|h265)\]/gi, ' ');
 
-    // 4. Replace common separators with spaces to help PTT.
+    // 4. Replace common separators with spaces.
     sanitized = sanitized.replace(/[._-]/g, ' ');
 
-    // 5. Clean up multiple spaces and trim.
+    // 5. Remove any remaining bracket characters.
+    sanitized = sanitized.replace(/[\[\]()]/g, ' ');
+
+    // 6. Clean up multiple spaces and trim any leading/trailing spaces or separators.
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;

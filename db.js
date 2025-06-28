@@ -1,7 +1,8 @@
 /**
  * db.js
- * Database Connection (PostgreSQL with pg library)
- * Initializes a PostgreSQL connection pool and provides a simple query function.
+ * Database Connection (PostgreSQL with pg)
+ * Initializes a PostgreSQL connection pool using the 'pg' library,
+ * and ensures the necessary tables exist.
  */
 
 const { Pool } = require('pg');
@@ -11,9 +12,8 @@ const logger = require('./src/utils').logger;
 let pool;
 
 /**
- * Initializes the PostgreSQL connection pool.
+ * Initializes the PostgreSQL connection pool and ensures the database schema is set up.
  * This function should be called once when the application starts.
- * It also creates the 'torrents' table if it doesn't exist and adds necessary columns.
  */
 async function initializePg() {
   if (!pool) {
@@ -22,105 +22,89 @@ async function initializePg() {
       logger.error('DATABASE_URL is not set in config. Database operations will fail.');
       throw new Error('DATABASE_URL is not configured.');
     }
-
-    // Append sslmode=disable to connection URL if not already present
-    // This is crucial for local/Docker setups where SSL might not be configured on PG server.
-    const url = new URL(config.database.url);
-    if (!url.searchParams.has('sslmode')) {
-      const separator = url.search ? '&' : '?';
-      config.database.url += `${separator}sslmode=disable`;
-    }
-    // Mask password for logging purposes
-    const maskedUrl = config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@');
-    logger.info(`Attempting to connect to database using URL: ${maskedUrl}`);
+    logger.info(`Attempting to connect to database using URL: ${config.database.url.replace(/:\/\/[^:]+:[^@]+@/, '://user:password@')}`); // Log URL without actual password for security
 
     pool = new Pool({
       connectionString: config.database.url,
-      // ssl: false (or rejectUnauthorized: false) is handled by 'sslmode=disable' in connection string
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false, // Adjust SSL for production
     });
 
+    pool.on('error', (err) => {
+      logger.error('Unexpected error on idle client in PostgreSQL pool', err);
+      // It's critical to react to pool errors. Depending on your environment,
+      // you might want to gracefully exit, or attempt a full re-initialization.
+      // For now, we'll log and let the process continue, but prepare for failures.
+      // process.exit(-1); // Consider uncommenting this for unrecoverable errors.
+    });
+
+    let client;
     try {
-      // Test the connection
-      await pool.query('SELECT NOW()');
+      client = await pool.connect();
       logger.info('Successfully connected to PostgreSQL database.');
 
-      // Create the torrents table if it doesn't exist
-      await pool.query(`
+      // --- Automate Table Creation ---
+      const createTableSql = `
         CREATE TABLE IF NOT EXISTS torrents (
-          id SERIAL PRIMARY KEY,
-          infohash TEXT UNIQUE NOT NULL,
-          tmdb_id TEXT NOT NULL,
-          season_number INTEGER NOT NULL,
-          episode_number INTEGER NOT NULL,
-          torrent_name TEXT NOT NULL,
-          parsed_info_json JSONB,
-          real_debrid_torrent_id TEXT,
-          real_debrid_file_id TEXT,
-          real_debrid_link TEXT,
-          real_debrid_info_json JSONB,
-          added_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-          language_preference TEXT,
-          seeders INTEGER,
-          CONSTRAINT unique_infohash UNIQUE (infohash),
-          CONSTRAINT unique_real_debrid_torrent_id UNIQUE (real_debrid_torrent_id)
+            id SERIAL PRIMARY KEY,
+            infohash VARCHAR(40) UNIQUE NOT NULL,
+            tmdb_id VARCHAR(255) NOT NULL,
+            season_number INTEGER NOT NULL,
+            episode_number INTEGER NOT NULL,
+            torrent_name TEXT NOT NULL,
+            parsed_info_json JSONB NOT NULL,
+            real_debrid_torrent_id VARCHAR(255) UNIQUE NOT NULL,
+            real_debrid_file_id VARCHAR(255) NOT NULL,
+            real_debrid_link TEXT NOT NULL,
+            real_debrid_info_json JSONB, -- Storing full RD info for status checks
+            added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            language_preference VARCHAR(10),
+            seeders INTEGER, -- Allow null for seeders if Bitmagnet doesn't provide
+            -- Combined index for quick episode lookups
+            UNIQUE (tmdb_id, season_number, episode_number, infohash)
         );
-        -- Add indexes for common lookup fields
-        CREATE INDEX IF NOT EXISTS idx_torrents_tmdb_episode ON torrents (tmdb_id, season_number, episode_number);
+
+        -- Add indexes for common lookup fields if not covered by unique constraints
         CREATE INDEX IF NOT EXISTS idx_torrents_infohash ON torrents (infohash);
-        CREATE INDEX IF NOT EXISTS idx_torrents_real_debrid_torrent_id ON torrents (real_debrid_torrent_id);
-      `);
-      logger.info('Ensured "torrents" table exists in the database.');
+        CREATE INDEX IF NOT EXISTS idx_torrents_rd_torrent_id ON torrents (real_debrid_torrent_id);
+        CREATE INDEX IF NOT EXISTS idx_torrents_tmdb_episode ON torrents (tmdb_id, season_number, episode_number);
+      `;
+      await client.query(createTableSql);
+      logger.info('Ensured "torrents" table schema exists in PostgreSQL.');
 
-      // Add real_debrid_info_json column if it doesn't exist (for existing databases)
-      await pool.query(`
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_info_json') THEN
-                ALTER TABLE torrents ADD COLUMN real_debrid_info_json JSONB;
-                RAISE NOTICE 'Added real_debrid_info_json column to torrents table.';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_torrent_id') THEN
-                ALTER TABLE torrents ADD COLUMN real_debrid_torrent_id TEXT;
-                RAISE NOTICE 'Added real_debrid_torrent_id column to torrents table.';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_file_id') THEN
-                ALTER TABLE torrents ADD COLUMN real_debrid_file_id TEXT;
-                RAISE NOTICE 'Added real_debrid_file_id column to torrents table.';
-            END IF;
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='torrents' AND column_name='real_debrid_link') THEN
-                ALTER TABLE torrents ADD COLUMN real_debrid_link TEXT;
-                RAISE NOTICE 'Added real_debrid_link column to torrents table.';
-            END IF;
-        END $$;
-      `);
-      logger.info('Ensured all Real-Debrid related columns exist in "torrents" table.');
-
-    } catch (error) {
-      logger.error('Failed to connect to PostgreSQL database or ensure schema:', error);
-      // Do not exit the process here, allow app to start, but DB ops will fail
+    } catch (err) {
+      logger.error('Failed to connect to or set up PostgreSQL database schema:', err);
+      // IMPORTANT: If schema setup fails, the app cannot function correctly.
+      // It's appropriate to re-throw or exit here.
+      throw err;
+    } finally {
+      if (client) {
+        client.release();
+      }
     }
   }
-  return pool;
 }
 
 /**
- * Executes a SQL query using the connection pool.
- * @param {string} text - The SQL query string.
- * @param {Array<any>} [params] - An array of parameters for the query.
- * @returns {Promise<import('pg').QueryResult>} The result of the query.
+ * Executes a SQL query using the PostgreSQL connection pool.
+ * @param {string} text - The SQL query text.
+ * @param {Array<any>} params - An array of query parameters.
+ * @returns {Promise<object>} The query result object.
  */
 async function query(text, params) {
   if (!pool) {
-    logger.error('PostgreSQL pool not initialized. Cannot execute query.');
-    throw new Error('Database pool not ready.');
+    logger.error('PostgreSQL pool not initialized. Call initializePg() first.');
+    throw new Error('Database pool not initialized.');
   }
+  const start = Date.now();
   try {
     const res = await pool.query(text, params);
+    const duration = Date.now() - start;
+    logger.debug(`Executed query: ${text} with params: [${params}] in ${duration}ms. Rows: ${res.rowCount}`);
     return res;
-  } catch (error) {
-    logger.error(`Error executing query: "${text}" with params: ${JSON.stringify(params)}`, error);
-    throw error;
+  } catch (err) {
+    logger.error(`Error executing query: ${text} with params: [${params}]`, err);
+    throw err; // Re-throw the error for upstream error handling
   }
 }
 

@@ -181,15 +181,20 @@ async function startAddonServer() {
 
         if (type === 'series') {
             const [imdbId, season, episode] = id.split(':');
+            const seasonNum = parseInt(season);
+            const episodeNum = parseInt(episode);
+
             const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = 'series' AND rd_torrent_info_json IS NOT NULL", [imdbId]);
             const showDetails = await getShowDetails(imdbId);
             if (!showDetails) return { streams: [] };
 
-            const searchString = `${showDetails.name} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-            // --- CORRECTED CALL FOR SERIES ---
+            // --- THIS IS THE CORRECTED LOGIC ---
+            // We search Bitmagnet using ONLY the show's title to find all related torrents.
+            const searchString = showDetails.name;
+            logger.debug(`[ADDON] Corrected series search string: "${searchString}"`);
             const newTorrents = await searchTorrents(searchString, 'tv_show');
             
-            const { streams, cachedStreams } = await matcher.findBestSeriesStreams(showDetails, parseInt(season), parseInt(episode), newTorrents, rows, PREFERRED_LANGUAGES);
+            const { streams, cachedStreams } = await matcher.findBestSeriesStreams(showDetails, seasonNum, episodeNum, newTorrents, rows, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
             
             logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for series ${id}`);
@@ -211,7 +216,6 @@ async function startAddonServer() {
             if (!movieDetails) return { streams: [] };
 
             const searchString = movieDetails.title;
-            // --- CORRECTED CALL FOR MOVIES ---
             const newTorrents = await searchTorrents(searchString, 'movie');
 
             const { streams, cachedStreams } = await matcher.findBestMovieStreams(movieDetails, newTorrents, rows, PREFERRED_LANGUAGES);

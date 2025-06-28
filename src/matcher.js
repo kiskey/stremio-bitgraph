@@ -6,7 +6,6 @@ import { logger, QUALITY_ORDER, getQuality, sanitizeName } from './utils.js';
 
 function getTitleSimilarity(tmdbTitle, torrentName) {
     if (!tmdbTitle) return 0;
-    // The sanitization is now done *before* this function is called.
     const parsed = PTT.parse(torrentName);
     if (!parsed.title) return 0;
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
@@ -47,7 +46,6 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        // --- NEW ROBUST LOGIC ---
         logger.debug(`[MATCHER-SERIES] Evaluating torrent: "${torrentData.name}"`);
         const sanitizedName = sanitizeName(torrentData.name);
         logger.debug(`[MATCHER-SERIES] -> Sanitized to: "${sanitizedName}"`);
@@ -62,13 +60,24 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
         const torrentInfo = PTT.parse(sanitizedName);
+        logger.debug(`[MATCHER-SERIES] -> PTT found: Season ${torrentInfo.season || 'N/A'}, Episode ${torrentInfo.episode || 'N/A'}`);
+
+        // --- FINAL, CORRECTED LOGIC ---
+        // Case 1: Direct match on torrent name.
         if (torrentInfo.season === season && torrentInfo.episode === episode) {
             logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
             continue;
         }
 
-        logger.debug(`[MATCHER-SERIES] -> Title similar, but S/E mismatch. Diving into files...`);
+        // Case 2: PTT found a specific but *different* episode. Reject it.
+        if (torrentInfo.season && torrentInfo.episode) {
+            logger.debug(`[MATCHER-SERIES] -> REJECTED: Torrent name is for a different episode (S${torrentInfo.season}E${torrentInfo.episode}).`);
+            continue;
+        }
+
+        // Case 3: PTT found a season pack or could not parse an episode number. Dive into files.
+        logger.debug(`[MATCHER-SERIES] -> Torrent is a pack or unspecific. Diving into files...`);
         const files = await getTorrentFiles(torrent.infoHash);
         if (!files || files.length === 0) continue;
         for (const file of files) {
@@ -98,7 +107,6 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        // --- APPLYING THE SAME ROBUST LOGIC TO MOVIES ---
         logger.debug(`[MATCHER-MOVIE] Evaluating new torrent: "${torrentData.name}"`);
         const sanitizedName = sanitizeName(torrentData.name);
         logger.debug(`[MATCHER-MOVIE] -> Sanitized to: "${sanitizedName}"`);

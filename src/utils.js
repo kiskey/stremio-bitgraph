@@ -25,24 +25,29 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- NEW: Sanitization function to clean torrent names ---
+// --- NEW, MORE INTELLIGENT SANITIZATION FUNCTION ---
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove CJK (Chinese, Japanese, Korean) characters and other common non-ASCII symbols
+    // 1. Remove known website prefixes that are often outside brackets.
+    // This looks for "www.domain.tld - " and removes it.
+    sanitized = sanitized.replace(/www\.\S+\.\w+\s*-\s*/gi, ' ');
+
+    // 2. Remove bracketed website/release group prefixes.
+    // This looks for "[ some.thing ]" at the beginning of the string.
+    sanitized = sanitized.replace(/^\[.*?\]\s*/, ' ');
+
+    // 3. Remove CJK (Chinese, Japanese, Korean) characters, which often contain ads or metadata.
     sanitized = sanitized.replace(/[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uffef\u4e00-\u9faf\u3400-\u4dbf]/g, ' ');
 
-    // 2. Remove common URL patterns (e.g., www.domain.com, domain.org)
-    sanitized = sanitized.replace(/www\.\S+\.\w+/g, ' ');
+    // 4. Remove the bracket characters themselves, but LEAVE the content inside.
+    // This is the key change that fixes the bug you found.
+    sanitized = sanitized.replace(/[\[\]【】]/g, ' ');
 
-    // 3. Remove bracketed release group info and other fluff (e.g., [TTHDTT.com], [ExYuSubs])
-    sanitized = sanitized.replace(/\[.*?\]/g, ' ');
-    sanitized = sanitized.replace(/【.*?】/g, ' ');
-
-    // 4. Replace common separators with spaces to help PTT
+    // 5. Replace common separators with spaces to help PTT parse correctly.
     sanitized = sanitized.replace(/[._-]/g, ' ');
 
-    // 5. Clean up multiple spaces
+    // 6. Clean up any resulting multiple spaces.
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;

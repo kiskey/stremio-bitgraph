@@ -9,15 +9,16 @@ const tmdb = axios.create({
     },
 });
 
-// In-memory cache to avoid re-fetching the same show details repeatedly
 const showCache = new Map();
 
 export async function getShowDetails(imdbId) {
     if (showCache.has(imdbId)) {
+        logger.debug(`[TMDB] Returning cached details for ${imdbId}`);
         return showCache.get(imdbId);
     }
 
     try {
+        logger.debug(`[TMDB] Finding TV show with IMDb ID: ${imdbId}`);
         const findResponse = await tmdb.get(`/find/${imdbId}`, {
             params: { external_source: 'imdb_id' },
         });
@@ -27,11 +28,12 @@ export async function getShowDetails(imdbId) {
         }
 
         const show = findResponse.data.tv_results[0];
-        showCache.set(imdbId, show); // Cache the result
+        logger.debug(`[TMDB] Found show: "${show.name}" (ID: ${show.id})`);
+        showCache.set(imdbId, show);
         return show;
 
     } catch (error) {
-        logger.error(`Error fetching show details from TMDB for ${imdbId}: ${error.message}`);
+        logger.error(`[TMDB] Error fetching show details for ${imdbId}: ${error.message}`);
         return null;
     }
 }

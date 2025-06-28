@@ -1,8 +1,8 @@
 import express from 'express';
 import cors from 'cors';
-// FIX: Correctly import the CommonJS module 'stremio-addon-sdk'
+// FIX 1: Correctly import both addonBuilder and serveHTTP from the SDK's default export
 import sdk from 'stremio-addon-sdk';
-const { addonBuilder } = sdk; // Destructure the necessary components from the default export
+const { addonBuilder, serveHTTP } = sdk;
 
 import { manifest } from './manifest.js';
 import { PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
@@ -136,10 +136,10 @@ app.get(`/${ADDON_ID}/play-cached/:imdbId_season_episode/:infoHash`, async (req,
 });
 
 
-// FIX: This is the correct way to integrate the Stremio SDK with an existing Express app.
-// It creates an interface from the builder and then uses the official router.
+// FIX 2: This is the correct and final way to integrate the Stremio SDK with Express.
 const addonInterface = builder.getInterface();
-app.use(addonInterface.router);
+// serveHTTP() takes the interface and returns a valid middleware function for Express to use.
+app.use(serveHTTP(addonInterface));
 
 app.listen(PORT, () => {
     logger.info(`Stremio addon server running on ${APP_HOST}`);

@@ -2,6 +2,7 @@
  * src/realdebrid.js
  * Real-Debrid API Client
  * Handles interactions with the Real-Debrid API for adding, monitoring, and unrestricting torrents.
+ * The access token is now sourced from config.js (environment variable).
  */
 
 const axios = require('axios');
@@ -12,35 +13,29 @@ const REALDEBRID_BASE_URL = config.realDebrid.baseUrl;
 
 /**
  * Creates an Axios instance with Real-Debrid specific headers.
- * @param {string} accessToken - The user's Real-Debrid API token.
+ * Access token is now provided via config, not as a parameter to this function directly.
  * @returns {axios.AxiosInstance} Configured Axios instance.
  */
-function createRealDebridClient(accessToken) {
+function createRealDebridClient() {
+  const accessToken = config.realDebridApiKey; // Get Real-Debrid API Key from config
   if (!accessToken) {
-    throw new Error('Real-Debrid API Token is required.');
+    throw new Error('Real-Debrid API Key is not configured.');
   }
   return axios.create({
     baseURL: REALDEBRID_BASE_URL,
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
-    // Real-Debrid has a rate limit of 250 requests per minute.
-    // Adding a small delay between requests for this client.
-    // This is a basic way to manage, more advanced might use a queue.
-    // transformRequest: [function (data, headers) {
-    //   return new Promise(resolve => setTimeout(() => resolve(data), config.realDebrid.rateLimitDelayMs));
-    // }, ...axios.defaults.transformRequest],
   });
 }
 
 /**
  * Adds a magnet link to Real-Debrid.
- * @param {string} accessToken - User's Real-Debrid API token.
  * @param {string} magnetLink - The magnet link to add.
  * @returns {Promise<object|null>} Real-Debrid torrent object, or null on error.
  */
-async function addMagnet(accessToken, magnetLink) {
-  const client = createRealDebridClient(accessToken);
+async function addMagnet(magnetLink) {
+  const client = createRealDebridClient(); // No accessToken parameter needed
   const url = '/torrents/addMagnet';
   logger.info(`Adding magnet to Real-Debrid: ${magnetLink.substring(0, 50)}...`); // Log first 50 chars
 
@@ -49,7 +44,7 @@ async function addMagnet(accessToken, magnetLink) {
       async () => client.post(url, `magnet=${encodeURIComponent(magnetLink)}`, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
       }),
-      config.realDebrid.retry
+      config.realDebrid.retry // Using specific Real-Debrid retry config
     );
     logger.debug('Real-Debrid addMagnet response:', response.data);
     return response.data;
@@ -61,17 +56,16 @@ async function addMagnet(accessToken, magnetLink) {
 
 /**
  * Gets info about an added torrent on Real-Debrid.
- * @param {string} accessToken - User's Real-Debrid API token.
  * @param {string} torrentId - The Real-Debrid internal torrent ID.
  * @returns {Promise<object|null>} Torrent info object, or null on error.
  */
-async function getTorrentInfo(accessToken, torrentId) {
-  const client = createRealDebridClient(accessToken);
+async function getTorrentInfo(torrentId) {
+  const client = createRealDebridClient(); // No accessToken parameter needed
   const url = `/torrents/info/${torrentId}`;
   try {
     const response = await retryWithExponentialBackoff(
       async () => client.get(url),
-      config.realDebrid.retry
+      config.realDebrid.retry // Using specific Real-Debrid retry config
     );
     return response.data;
   } catch (error) {
@@ -82,13 +76,12 @@ async function getTorrentInfo(accessToken, torrentId) {
 
 /**
  * Selects files within an added torrent to start download on Real-Debrid.
- * @param {string} accessToken - User's Real-Debrid API token.
  * @param {string} torrentId - The Real-Debrid internal torrent ID.
  * @param {string} files - Comma-separated file IDs (e.g., "0" for the first file, or "all").
  * @returns {Promise<object|null>} Success object, or null on error.
  */
-async function selectFiles(accessToken, torrentId, files) {
-  const client = createRealDebridClient(accessToken);
+async function selectFiles(torrentId, files) {
+  const client = createRealDebridClient(); // No accessToken parameter needed
   const url = `/torrents/selectFiles/${torrentId}`;
   logger.info(`Selecting files ${files} for torrent ${torrentId} on Real-Debrid.`);
   try {
@@ -96,7 +89,7 @@ async function selectFiles(accessToken, torrentId, files) {
       async () => client.post(url, `files=${files}`, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
       }),
-      config.realDebrid.retry
+      config.realDebrid.retry // Using specific Real-Debrid retry config
     );
     return response.data;
   } catch (error) {
@@ -107,21 +100,21 @@ async function selectFiles(accessToken, torrentId, files) {
 
 /**
  * Polls Real-Debrid until a torrent is ready for streaming or a timeout occurs.
- * @param {string} accessToken - User's Real-Debrid API token.
+ * Uses retry logic from config.realDebrid.retry for polling intervals and attempts.
  * @param {string} torrentId - The Real-Debrid internal torrent ID.
- * @param {number} timeoutMs - Maximum time to poll in milliseconds.
- * @param {number} intervalMs - Initial polling interval in milliseconds.
  * @returns {Promise<object|null>} The torrent info object when ready, or null if timeout.
  */
-async function pollForTorrentCompletion(accessToken, torrentId, timeoutMs = 300000, intervalMs = 3000) { // 5 minutes timeout, 3s initial interval
+async function pollForTorrentCompletion(torrentId) { // Removed accessToken, timeoutMs, intervalMs
   const startTime = Date.now();
-  let currentInterval = intervalMs;
-  const maxInterval = config.realDebrid.retry.maxDelayMs || 16000; // Cap polling interval
+  let currentInterval = config.realDebrid.retry.initialDelayMs;
+  const maxInterval = config.realDebrid.retry.maxDelayMs;
+  const maxAttempts = config.realDebrid.retry.maxAttempts;
+  let attempts = 0;
 
-  logger.info(`Polling Real-Debrid for torrent ${torrentId} status...`);
+  logger.info(`Polling Real-Debrid for torrent ${torrentId} status... (Max attempts: ${maxAttempts}, Initial interval: ${currentInterval}ms)`);
 
-  while (Date.now() - startTime < timeoutMs) {
-    const torrentInfo = await getTorrentInfo(accessToken, torrentId);
+  while (attempts < maxAttempts) {
+    const torrentInfo = await getTorrentInfo(torrentId); // No accessToken parameter needed
 
     if (torrentInfo && torrentInfo.status === 'downloaded' && torrentInfo.links && torrentInfo.links.length > 0) {
       logger.info(`Torrent ${torrentId} is downloaded and ready.`);
@@ -133,25 +126,30 @@ async function pollForTorrentCompletion(accessToken, torrentId, timeoutMs = 3000
       return null;
     }
 
-    logger.debug(`Torrent ${torrentId} status: ${torrentInfo ? torrentInfo.status : 'unknown'}. Retrying in ${currentInterval / 1000}s...`);
+    attempts++;
+    if (attempts >= maxAttempts) {
+        logger.warn(`Max polling attempts (${maxAttempts}) reached for torrent ${torrentId}. Current status: ${torrentInfo ? torrentInfo.status : 'unknown'}.`);
+        return null;
+    }
+
+    logger.debug(`Torrent ${torrentId} status: ${torrentInfo ? torrentInfo.status : 'unknown'}. Retrying in ${currentInterval / 1000}s... (Attempt ${attempts}/${maxAttempts})`);
     await sleep(currentInterval);
 
     // Exponential backoff with jitter
     currentInterval = Math.min(maxInterval, currentInterval * 2 + Math.random() * 1000);
   }
 
-  logger.warn(`Polling for torrent ${torrentId} timed out after ${timeoutMs / 1000} seconds.`);
+  logger.warn(`Polling for torrent ${torrentId} failed after all attempts.`);
   return null;
 }
 
 /**
  * Unrestricts a Real-Debrid generated link to a direct streaming URL.
- * @param {string} accessToken - User's Real-Debrid API token.
  * @param {string} realDebridLink - The link provided by Real-Debrid after torrent completion.
  * @returns {Promise<string|null>} The direct streaming URL, or null on error.
  */
-async function unrestrictLink(accessToken, realDebridLink) {
-  const client = createRealDebridClient(accessToken);
+async function unrestrictLink(realDebridLink) {
+  const client = createRealDebridClient(); // No accessToken parameter needed
   const url = '/unrestrict/link';
   logger.info(`Unrestricting Real-Debrid link: ${realDebridLink.substring(0, 50)}...`);
   try {
@@ -159,7 +157,7 @@ async function unrestrictLink(accessToken, realDebridLink) {
       async () => client.post(url, `link=${encodeURIComponent(realDebridLink)}`, {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
       }),
-      config.realDebrid.retry
+      config.realDebrid.retry // Using specific Real-Debrid retry config
     );
     logger.debug('Real-Debrid unrestrictLink response:', response.data);
     return response.data.download; // This typically contains the direct download URL

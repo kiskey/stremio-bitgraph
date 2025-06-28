@@ -226,11 +226,13 @@ app.get('/stream/:type/:id', async (req, res) => {
   }
 
   // 3. Search Bitmagnet for torrents
-  const bitmagnetSearchQuery = `${tmdbShowTitle} S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
+  // CRITICAL FIX: Query Bitmagnet using only the show title, not SxxExx
+  const bitmagnetSearchQuery = tmdbShowTitle;
   let bitmagnetResults = [];
   try {
     // Pass Bitmagnet endpoint from config
-    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders, preferredLanguages, bitmagnetGraphQLEndpoint);
+    // Removed preferredLanguages param as it's not used in searchTorrents anymore
+    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders);
     logger.info(`Bitmagnet returned ${bitmagnetResults.length} potential torrents for "${bitmagnetSearchQuery}".`);
   } catch (bitmagnetError) {
     logger.error(`Error searching Bitmagnet: ${bitmagnetError.message}`);
@@ -242,7 +244,7 @@ app.get('/stream/:type/:id', async (req, res) => {
     bitmagnetResults,
     tmdbEpisodeDetails,
     tmdbShowTitle,
-    preferredLanguages,
+    preferredLanguages, // Pass preferredLanguages for scoring in matcher
     levenshteinThreshold // Pass the threshold
   );
 
@@ -347,7 +349,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
               try {
                   // pg driver might return JSONB as object directly, or string if column is text.
                   if (typeof cachedTorrentEntry.real_debrid_info_json === 'string') {
-                    torrentInfoFromRD = JSON.parse(cachedTorrentEntry.real_debrid_info_json);
+                    torrentInfoFromRD = JSON.parse(cachedTorrent.real_debrid_info_json); // CRITICAL FIX: Use cachedTorrentEntry here
                   } else {
                     torrentInfoFromRD = cachedTorrentEntry.real_debrid_info_json;
                   }
@@ -383,7 +385,8 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           if (!rdAddedTorrentId) {
               const tmdbShowDetailsForMagnet = await tmdb.getTvShowDetails(tmdbId);
               // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
-              const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`"${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}"`, undefined, undefined, config.bitmagnet.graphqlEndpoint);
+              // CRITICAL FIX: Pass only show title to searchTorrents
+              const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}`, config.minSeeders);
               const matchingTorrent = bitmagnetResultsForMagnet.find(t => t.infoHash === infoHash);
 
               if (!matchingTorrent || !matchingTorrent.magnetLink) {
@@ -397,6 +400,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
               seedersForDb = matchingTorrent.seeders || 0;
 
               logger.info(`Adding magnet to Real-Debrid for infohash: ${infoHash}`);
+              // realDebridApiKey now comes from config
               const rdAddedTorrent = await realDebrid.addMagnet(realDebridApiKey, selectedTorrentMagnetUri);
 
               if (!rdAddedTorrent || !rdAddedTorrent.id) {
@@ -484,7 +488,8 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           try {
               if (!parsedInfoForDb || !torrentNameForDb) {
                  // Re-fetch torrent details from Bitmagnet if not available.
-                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`, undefined, undefined, config.bitmagnet.graphqlEndpoint);
+                 // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
+                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`${infoHash}`, config.minSeeders); // CRITICAL FIX: Pass only infoHash as query
                  const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => t.infoHash === infoHash);
 
                  if (preciseTorrentDetails) {

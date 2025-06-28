@@ -6,15 +6,13 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-import { logger, getQuality, sleep } from './src/utils.js';
+import { logger, getQuality } from './src/utils.js';
 import { getShowDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
 import PTT from 'parse-torrent-title';
 
-// --- ROBUST, REQUEST-AWARE LOCKING MECHANISM ---
-// Instead of a simple Set, we use a Map to store the Promise of the ongoing request.
 const processingRequests = new Map();
 
 async function startApiServer() {
@@ -25,13 +23,10 @@ async function startApiServer() {
         const { imdbId_season_episode, infoHash } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
         
-        // --- IDEMPOTENCY & REQUEST-AWARE CACHING LOGIC ---
         if (processingRequests.has(infoHash)) {
             logger.warn(`[API] Request for ${infoHash} is already being processed. Awaiting result...`);
             try {
-                // Wait for the original request to finish and get its result.
                 const readyTorrent = await processingRequests.get(infoHash);
-                // Now that we have the result, proceed as if we just finished polling ourselves.
                 return playFromReadyTorrent(res, readyTorrent, season, episode);
             } catch (error) {
                 logger.error(`[API] The original processing request for ${infoHash} failed: ${error.message}`);
@@ -39,7 +34,6 @@ async function startApiServer() {
             }
         }
 
-        // If no request is in progress, start a new one.
         const processPromise = new Promise(async (resolve, reject) => {
             try {
                 logger.info(`[API] Acquired lock for ${infoHash}. Processing NEW request.`);
@@ -62,13 +56,12 @@ async function startApiServer() {
                     [infoHash, imdbId, readyTorrent, language, quality, readyTorrent.seeders]
                 );
                 
-                resolve(readyTorrent); // Resolve the promise with the completed torrent info.
+                resolve(readyTorrent);
             } catch (error) {
-                reject(error); // Reject the promise if anything goes wrong.
+                reject(error);
             }
         });
 
-        // Store the promise in our map.
         processingRequests.set(infoHash, processPromise);
 
         try {
@@ -78,7 +71,6 @@ async function startApiServer() {
             logger.error(`[API] Error processing new torrent ${infoHash}: ${error.message}`);
             res.status(500).send(`Error: ${error.message}`);
         } finally {
-            // Clean up the map once the request is fully complete.
             processingRequests.delete(infoHash);
             logger.info(`[API] Released lock for ${infoHash}.`);
         }
@@ -105,7 +97,6 @@ async function startApiServer() {
     });
 }
 
-// --- HELPER FUNCTION TO AVOID CODE DUPLICATION ---
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
         const fileInfo = PTT.parse(file.path);
@@ -157,7 +148,7 @@ async function startAddonServer() {
             const { cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, [], cachedTorrents, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams([], cachedStreams, PREFERRED_LANGUAGES);
             const streamObjects = sortedStreams.map(stream => ({
-                name: `[RD] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
+                name: `[⚡ RD] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
                 title: `${stream.torrentName}\nSeeders: ${stream.seeders}`,
                 url: `${APP_HOST}/${ADDON_ID}/play-cached/${args.id}/${stream.infoHash}`
             }));
@@ -173,12 +164,14 @@ async function startAddonServer() {
         logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for ${args.id}`);
 
         const streamObjects = sortedStreams.map(stream => {
+            // --- UPDATED VISUAL INDICATOR LOGIC ---
+            const prefix = stream.isCached ? '⚡ RD' : '⌛ RD+';
             const callbackUrl = stream.isCached
                 ? `${APP_HOST}/${ADDON_ID}/play-cached/${args.id}/${stream.infoHash}`
                 : `${APP_HOST}/${ADDON_ID}/process-new/${args.id}/${stream.infoHash}/${stream.fileIndex}`;
             
             return {
-                name: `[${stream.isCached ? 'RD' : 'RD+'}] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
+                name: `[${prefix}] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
                 title: `${stream.torrentName}\nSeeders: ${stream.seeders}`,
                 url: callbackUrl,
             };

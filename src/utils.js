@@ -25,29 +25,24 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- NEW, MORE INTELLIGENT SANITIZATION FUNCTION ---
+// --- FINAL, ROBUST SANITIZATION FUNCTION ---
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove known website prefixes that are often outside brackets.
-    // This looks for "www.domain.tld - " and removes it.
-    sanitized = sanitized.replace(/www\.\S+\.\w+\s*-\s*/gi, ' ');
+    // 1. Remove specific known noisy prefixes first.
+    sanitized = sanitized.replace(/^www\.\S+\.\w+\s*-\s*/i, '');
 
-    // 2. Remove bracketed website/release group prefixes.
-    // This looks for "[ some.thing ]" at the beginning of the string.
-    sanitized = sanitized.replace(/^\[.*?\]\s*/, ' ');
+    // 2. Remove CJK characters, leaving surrounding text.
+    sanitized = sanitized.replace(/[\u3000-\u9faf\u3400-\u4dbf【】]/g, ' ');
 
-    // 3. Remove CJK (Chinese, Japanese, Korean) characters, which often contain ads or metadata.
-    sanitized = sanitized.replace(/[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uffef\u4e00-\u9faf\u3400-\u4dbf]/g, ' ');
+    // 3. Remove bracketed URLs or other junk, but be less greedy.
+    // This targets brackets containing common TLDs or keywords like "release".
+    sanitized = sanitized.replace(/\[\s*(www\.\S+|\S+\.(com|net|org|info))\s*\]/gi, ' ');
 
-    // 4. Remove the bracket characters themselves, but LEAVE the content inside.
-    // This is the key change that fixes the bug you found.
-    sanitized = sanitized.replace(/[\[\]【】]/g, ' ');
-
-    // 5. Replace common separators with spaces to help PTT parse correctly.
+    // 4. Replace common separators with spaces to help PTT.
     sanitized = sanitized.replace(/[._-]/g, ' ');
 
-    // 6. Clean up any resulting multiple spaces.
+    // 5. Clean up multiple spaces and trim.
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;

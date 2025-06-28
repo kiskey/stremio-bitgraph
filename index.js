@@ -14,12 +14,11 @@ import * as rd from './src/realdebrid.js';
 import PTT from 'parse-torrent-title';
 
 // --- API SERVER (Express) ---
-// This server's ONLY job is to handle the Real-Debrid callbacks.
 async function startApiServer() {
     const app = express();
     app.use(cors());
 
-    // Endpoint 1: Process a NEW torrent
+    // All API endpoints remain the same...
     app.get(`/${ADDON_ID}/process-new/:imdbId_season_episode/:infoHash/:fileIndex`, async (req, res) => {
         const { imdbId_season_episode, infoHash, fileIndex } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
@@ -60,7 +59,6 @@ async function startApiServer() {
         }
     });
 
-    // Endpoint 2: Play from a CACHED torrent
     app.get(`/${ADDON_ID}/play-cached/:imdbId_season_episode/:infoHash`, async (req, res) => {
         const { imdbId_season_episode, infoHash } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
@@ -93,17 +91,17 @@ async function startApiServer() {
 
 
 // --- STREMIO ADDON SERVER ---
-// This server's ONLY job is to respond to Stremio's manifest and stream requests.
 async function startAddonServer() {
     await initDb();
     
     const builder = new addonBuilder(manifest);
 
     builder.defineStreamHandler(async (args) => {
-        logger.info(`[ADDON] Stream request: ${args.id}`);
+        logger.info(`[ADDON] Stream request received: ${args.id}`);
         const [imdbId, season, episode] = args.id.split(':');
         const seasonNum = parseInt(season, 10);
         const episodeNum = parseInt(episode, 10);
+        logger.debug(`[ADDON] Parsed request for IMDb ID: ${imdbId}, Season: ${seasonNum}, Episode: ${episodeNum}`);
 
         let cachedTorrents = [];
         try {
@@ -112,23 +110,36 @@ async function startAddonServer() {
                 [imdbId]
             );
             cachedTorrents = result.rows;
+            logger.debug(`[ADDON] Found ${cachedTorrents.length} cached torrents for ${imdbId}`);
         } catch (dbError) {
             logger.error('[ADDON] Error querying cached torrents:', dbError);
         }
 
+        // *** CORE BUG FIX IS HERE ***
         const showDetails = await getShowDetails(imdbId);
-        if (!showDetails) {
-            return { streams: [] };
+        if (!showDetails || !showDetails.name) {
+            logger.warn(`[ADDON] Could not find valid TMDB details for ${imdbId}. Aborting search for new torrents.`);
+            // We can still return streams from the cache if any were found
+            const { cachedStreams } = await matcher.findBestStreams(null, seasonNum, episodeNum, [], cachedTorrents);
+            const sortedStreams = matcher.sortAndFilterStreams([], cachedStreams, PREFERRED_LANGUAGES);
+            const streamObjects = sortedStreams.map(stream => ({
+                name: `[RD] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
+                title: `${stream.torrentName}\nSeeders: ${stream.seeders}`,
+                url: `${APP_HOST}/${ADDON_ID}/play-cached/${args.id}/${stream.infoHash}`
+            }));
+            return { streams: streamObjects };
         }
 
         const searchString = `${showDetails.name} S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
+        logger.debug(`[ADDON] Constructed Bitmagnet search string: "${searchString}"`);
         const newTorrents = await searchTorrents(searchString);
+        logger.debug(`[ADDON] Found ${newTorrents.length} new torrents from Bitmagnet.`);
 
         const { streams, cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, newTorrents, cachedTorrents);
         const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
+        logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for ${args.id}`);
 
         const streamObjects = sortedStreams.map(stream => {
-            // CRITICAL: The callback URL now points to the API server on API_PORT
             const callbackUrl = stream.isCached
                 ? `${APP_HOST}/${ADDON_ID}/play-cached/${args.id}/${stream.infoHash}`
                 : `${APP_HOST}/${ADDON_ID}/process-new/${args.id}/${stream.infoHash}/${stream.fileIndex}`;
@@ -143,7 +154,6 @@ async function startAddonServer() {
         return { streams: streamObjects };
     });
 
-    // This function starts the server and does not return.
     serveHTTP(builder.getInterface(), { port: PORT });
     logger.info(`[ADDON] Stremio addon server listening on http://127.0.0.1:${PORT}`);
     logger.info(`[ADDON] To install, use: http://<your_server_ip>:${PORT}/manifest.json`);

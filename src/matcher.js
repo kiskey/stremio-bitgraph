@@ -4,13 +4,14 @@ import { SIMILARITY_THRESHOLD } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
 import { logger, QUALITY_ORDER, getQuality } from './utils.js';
 
-function getTitleSimilarity(tmdbTitle, torrentName) {
+function getTitleSimilarity(tmdbShow, torrentName) {
+    // tmdbShow can be null if we are only processing cached results
+    if (!tmdbShow) return 0;
     const parsed = PTT.parse(torrentName);
     if (!parsed.title) return 0;
-    return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
+    return stringSimilarity.compareTwoStrings(tmdbShow.name.toLowerCase(), parsed.title.toLowerCase());
 }
 
-// --- CORRECTED: Export the function so it can be used by other modules ---
 export function getBestLanguage(torrentLanguages, preferredLanguages) {
     if (!torrentLanguages || torrentLanguages.length === 0) {
         return 'en';
@@ -41,10 +42,12 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
     const streams = [];
     const cachedStreams = [];
 
-    // Process cached torrents first
+    // --- CORRECTED CACHING LOGIC ---
+    // Process cached torrents first and check if they contain the *currently requested* episode.
     for (const torrent of cachedTorrents) {
         const file = findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode);
         if (file) {
+            logger.debug(`[MATCHER] Found S${season}E${episode} in cached torrent: "${torrent.rd_torrent_info_json.filename}"`);
             cachedStreams.push({
                 infoHash: torrent.infohash,
                 torrentName: torrent.rd_torrent_info_json.filename,
@@ -56,28 +59,22 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
         }
     }
 
-    // Process new torrents from Bitmagnet search
     const cachedInfoHashes = new Set(cachedTorrents.map(t => t.infohash));
     for (const torrent of newTorrents) {
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        logger.debug(`[MATCHER] Evaluating torrent: "${torrentData.name}"`);
+        logger.debug(`[MATCHER] Evaluating new torrent: "${torrentData.name}"`);
 
-        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
-        logger.debug(`[MATCHER] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
-
+        const titleSimilarity = getTitleSimilarity(tmdbShow, torrentData.name);
         if (titleSimilarity < SIMILARITY_THRESHOLD) {
             logger.debug(`[MATCHER] -> REJECTED: Low title similarity.`);
             continue;
         }
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-        logger.debug(`[MATCHER] -> Detected language as "${bestLanguage}" based on user preferences.`);
-
         const torrentInfo = PTT.parse(torrentData.name);
         if (torrentInfo.season === season && torrentInfo.episode === episode) {
-            logger.debug(`[MATCHER] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({
                 infoHash: torrent.infoHash,
                 fileIndex: 0,
@@ -90,21 +87,13 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
             continue;
         }
 
-        logger.debug(`[MATCHER] -> Title similar, but S/E mismatch. Diving into files...`);
         const files = await getTorrentFiles(torrent.infoHash);
-        if (!files || files.length === 0) {
-            logger.debug(`[MATCHER] -> REJECTED: No files found for this torrent.`);
-            continue;
-        }
+        if (!files || files.length === 0) continue;
 
         for (const file of files) {
             if (file.fileType !== 'video') continue;
-
-            logger.debug(`[MATCHER] -> Checking file: "${file.path}"`);
             const fileInfo = PTT.parse(file.path);
-
             if (fileInfo.season === season && fileInfo.episode === episode) {
-                logger.debug(`[MATCHER] -> ACCEPTED: Found matching file inside torrent.`);
                 streams.push({
                     infoHash: torrent.infoHash,
                     fileIndex: file.index,
@@ -133,13 +122,11 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
                 return langPriorityA - langPriorityB;
             }
         }
-
         const qualityA = QUALITY_ORDER[a.quality] || 99;
         const qualityB = QUALITY_ORDER[b.quality] || 99;
         if (qualityA !== qualityB) {
             return qualityA - qualityB;
         }
-
         return b.seeders - a.seeders;
     };
 

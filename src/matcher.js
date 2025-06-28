@@ -39,48 +39,65 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
         }
     }
 
-    // Process new torrents from Bitmagnet search
+    // Process new torrents from Bitmagnet search using the detailed algorithm
     const cachedInfoHashes = new Set(cachedTorrents.map(t => t.infohash));
     for (const torrent of newTorrents) {
-        // The torrent object from the query now has a nested 'torrent' property
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
+        logger.debug(`[MATCHER] Evaluating torrent: "${torrentData.name}"`);
+
+        // Step 1: Check title similarity
         const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
-        if (titleSimilarity < SIMILARITY_THRESHOLD) continue;
+        logger.debug(`[MATCHER] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
 
+        if (titleSimilarity < SIMILARITY_THRESHOLD) {
+            logger.debug(`[MATCHER] -> REJECTED: Low title similarity.`);
+            continue;
+        }
+
+        // Step 2: Attempt to match at the torrent name level
         const torrentInfo = PTT.parse(torrentData.name);
-
-        if (torrentData.filesStatus === 'single' && torrentInfo.season === season && torrentInfo.episode === episode) {
+        if (torrentInfo.season === season && torrentInfo.episode === episode) {
+            logger.debug(`[MATCHER] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({
                 infoHash: torrent.infoHash,
-                fileIndex: 0,
+                fileIndex: 0, // For single-file torrents or packs where the name is specific
                 torrentName: torrentData.name,
                 seeders: torrent.seeders,
                 language: torrent.languages?.[0]?.id || 'en',
                 quality: getQuality(torrent.videoResolution),
                 isCached: false,
             });
+            continue; // Move to the next torrent
+        }
+
+        // Step 3: If title similarity is high but no S/E match, dive into files
+        logger.debug(`[MATCHER] -> Title similar, but S/E mismatch. Diving into files...`);
+        const files = await getTorrentFiles(torrent.infoHash);
+        if (!files || files.length === 0) {
+            logger.debug(`[MATCHER] -> REJECTED: No files found for this torrent.`);
             continue;
         }
 
-        if (torrentData.filesStatus === 'multi' || torrentData.filesStatus === 'over_threshold') {
-            const files = await getTorrentFiles(torrent.infoHash);
-            const bestFile = files.find(f => {
-                const fi = PTT.parse(f.path);
-                return f.fileType === 'video' && fi.season === season && fi.episode === episode;
-            });
+        for (const file of files) {
+            if (file.fileType !== 'video') continue;
 
-            if (bestFile) {
+            logger.debug(`[MATCHER] -> Checking file: "${file.path}"`);
+            const fileInfo = PTT.parse(file.path);
+
+            if (fileInfo.season === season && fileInfo.episode === episode) {
+                logger.debug(`[MATCHER] -> ACCEPTED: Found matching file inside torrent.`);
                 streams.push({
                     infoHash: torrent.infoHash,
-                    fileIndex: bestFile.index,
-                    torrentName: torrentData.name,
+                    fileIndex: file.index,
+                    torrentName: torrentData.name, // Still use the main name for context
                     seeders: torrent.seeders,
                     language: torrent.languages?.[0]?.id || 'en',
                     quality: getQuality(torrent.videoResolution),
                     isCached: false,
                 });
+                break; // Found our match, no need to check other files in this torrent
             }
         }
     }
@@ -116,5 +133,6 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
         }
     }
 
+    // Prepend cached streams to the very top, also sorted
     return [...cachedStreams, ...filteredStreams];
 }

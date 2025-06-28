@@ -36,6 +36,7 @@ query TorrentFiles($input: TorrentFilesQueryInput!) {
 }`;
 
 async function queryGraphQL(query, variables) {
+    logger.debug(`[BITMAGNET] Sending GraphQL query with variables: ${JSON.stringify(variables)}`);
     try {
         const response = await axios.post(BITMAGNET_GRAPHQL_ENDPOINT, { query, variables }, {
             headers: { 'Content-Type': 'application/json' }
@@ -45,7 +46,8 @@ async function queryGraphQL(query, variables) {
         }
         return response.data.data;
     } catch (error) {
-        logger.error(`Bitmagnet GraphQL query failed: ${error.message}`);
+        const errorMessage = error.response ? `Request failed with status code ${error.response.status}` : error.message;
+        logger.error(`[BITMAGNET] GraphQL query failed: ${errorMessage}`);
         return null;
     }
 }
@@ -54,7 +56,7 @@ export async function searchTorrents(searchString) {
     const data = await queryGraphQL(torrentContentSearchQuery, {
         input: {
             queryString: searchString,
-            limit: 100, // Fetch a good number of results to process
+            limit: 100,
             orderBy: [{ field: 'seeders', descending: true }],
             facets: { contentType: { filter: ["tv_show"] } }
         }
@@ -66,7 +68,7 @@ export async function getTorrentFiles(infoHash) {
     const data = await queryGraphQL(torrentFilesQuery, {
         input: {
             infoHashes: [infoHash],
-            limit: 1000 // Ensure all files in a pack are fetched
+            limit: 1000
         }
     });
     return data ? data.torrent.files.items : [];

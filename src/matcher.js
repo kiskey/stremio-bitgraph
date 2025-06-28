@@ -5,7 +5,6 @@ import { getTorrentFiles } from './bitmagnet.js';
 import { logger, QUALITY_ORDER, getQuality } from './utils.js';
 
 function getTitleSimilarity(tmdbShow, torrentName) {
-    // tmdbShow can be null if we are only processing cached results
     if (!tmdbShow) return 0;
     const parsed = PTT.parse(torrentName);
     if (!parsed.title) return 0;
@@ -42,8 +41,6 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
     const streams = [];
     const cachedStreams = [];
 
-    // --- CORRECTED CACHING LOGIC ---
-    // Process cached torrents first and check if they contain the *currently requested* episode.
     for (const torrent of cachedTorrents) {
         const file = findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode);
         if (file) {
@@ -54,7 +51,7 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
                 seeders: torrent.seeders,
                 language: torrent.language,
                 quality: torrent.quality,
-                isCached: true,
+                isCached: true, // This flag is the key
             });
         }
     }
@@ -82,7 +79,7 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
                 seeders: torrent.seeders,
                 language: bestLanguage,
                 quality: getQuality(torrent.videoResolution),
-                isCached: false,
+                isCached: false, // This flag is the key
             });
             continue;
         }
@@ -101,7 +98,7 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
                     seeders: torrent.seeders,
                     language: bestLanguage,
                     quality: getQuality(torrent.videoResolution),
-                    isCached: false,
+                    isCached: false, // This flag is the key
                 });
                 break;
             }

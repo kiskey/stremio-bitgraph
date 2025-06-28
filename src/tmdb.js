@@ -2,14 +2,12 @@
  * src/tmdb.js
  * TMDB API Client
  * Handles interactions with The Movie Database (TMDB) API for fetching TV show metadata.
+ * Uses TMDB_API_KEY from config.js (environment variable).
  */
 
 const axios = require('axios');
 const config = require('../config');
 const { retryWithExponentialBackoff, logger } = require('./utils');
-
-const TMDB_BASE_URL = config.tmdb.baseUrl;
-const TMDB_API_KEY = config.tmdb.apiKey;
 
 /**
  * Fetches TV show details from TMDB.
@@ -17,20 +15,20 @@ const TMDB_API_KEY = config.tmdb.apiKey;
  * @returns {Promise<object|null>} The TV show details, or null if not found.
  */
 async function getTvShowDetails(tmdbId) {
-  if (!TMDB_API_KEY) {
-    logger.warn('TMDB API Key is missing. Cannot fetch TV show details.');
+  if (!config.tmdb.apiKey) {
+    logger.warn('TMDB API Key is missing in environment configuration. Cannot fetch TV show details.');
     return null;
   }
-  const url = `${TMDB_BASE_URL}/tv/${tmdbId}`;
+  const url = `${config.tmdb.baseUrl}/tv/${tmdbId}`;
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.get(url, {
         params: {
-          api_key: TMDB_API_KEY,
+          api_key: config.tmdb.apiKey, // Uses server's TMDB API key
           append_to_response: 'seasons', // Fetch season details along with show details
         },
       }),
-      config.realDebrid.retry // Reusing retry config, adjust if TMDB needs different
+      config.retry // Using general retry config
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -58,20 +56,20 @@ async function getTvShowDetails(tmdbId) {
  * @returns {Promise<object|null>} The TV season details, or null if not found.
  */
 async function getTvSeasonDetails(tmdbId, seasonNumber) {
-  if (!TMDB_API_KEY) {
-    logger.warn('TMDB API Key is missing. Cannot fetch TV season details.');
+  if (!config.tmdb.apiKey) {
+    logger.warn('TMDB API Key is missing in environment configuration. Cannot fetch TV season details.');
     return null;
   }
-  const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNumber}`;
+  const url = `${config.tmdb.baseUrl}/tv/${tmdbId}/season/${seasonNumber}`;
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.get(url, {
         params: {
-          api_key: TMDB_API_KEY,
+          api_key: config.tmdb.apiKey, // Uses server's TMDB API key
           append_to_response: 'episodes', // Fetch episode details along with season details
         },
       }),
-      config.realDebrid.retry // Reusing retry config, adjust if TMDB needs different
+      config.retry // Using general retry config
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -100,19 +98,19 @@ async function getTvSeasonDetails(tmdbId, seasonNumber) {
  * @returns {Promise<object|null>} The TV episode details, or null if not found.
  */
 async function getTvEpisodeDetails(tmdbId, seasonNumber, episodeNumber) {
-  if (!TMDB_API_KEY) {
-    logger.warn('TMDB API Key is missing. Cannot fetch TV episode details.');
+  if (!config.tmdb.apiKey) {
+    logger.warn('TMDB API Key is missing in environment configuration. Cannot fetch TV episode details.');
     return null;
   }
-  const url = `${TMDB_BASE_URL}/tv/${tmdbId}/season/${seasonNumber}/episode/${episodeNumber}`;
+  const url = `${config.tmdb.baseUrl}/tv/${tmdbId}/season/${seasonNumber}/episode/${episodeNumber}`;
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.get(url, {
         params: {
-          api_key: TMDB_API_KEY,
+          api_key: config.tmdb.apiKey, // Uses server's TMDB API key
         },
       }),
-      config.realDebrid.retry // Reusing retry config, adjust if TMDB needs different
+      config.retry // Using general retry config
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data

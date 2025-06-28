@@ -25,27 +25,23 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- FINAL, PRODUCTION-READY SANITIZATION FUNCTION ---
+// --- FINAL, DEFINITIVE SANITIZATION FUNCTION ---
+// Implements the user's precise architectural requirements.
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove URLs and email addresses
-    sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
+    // 1. Remove any domain name formats like www.website.com or http://...
+    // The \b ensures we match whole words/domains.
+    sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+)\b/gi, ' ');
 
-    // 2. Remove CJK characters and symbols. This is a more comprehensive range.
-    sanitized = sanitized.replace(/[\u2E80-\u9FFF【】]/g, ' ');
+    // 2. Remove any "word" (a sequence of non-space characters) that contains CJK characters or special brackets.
+    // This is the key to removing "【高清...】" and "金妮与乔治娅" as whole units.
+    sanitized = sanitized.replace(/\S*[\u3000-\u9FFF【】]\S*/g, ' ');
 
-    // 3. Remove bracketed content that is likely metadata (e.g., [10集], [ExYuSubs])
-    // This looks for brackets containing mostly non-alphanumeric characters, or common keywords.
-    sanitized = sanitized.replace(/\[([^a-zA-Z0-9]*|subs?|web|dl|rip|hd|x264|x265|h264|h265)\]/gi, ' ');
+    // 3. Replace common separators with spaces. Standard brackets []() are NOT replaced.
+    sanitized = sanitized.replace(/[._]/g, ' ');
 
-    // 4. Replace common separators with spaces.
-    sanitized = sanitized.replace(/[._-]/g, ' ');
-
-    // 5. Remove any remaining bracket characters.
-    sanitized = sanitized.replace(/[\[\]()]/g, ' ');
-
-    // 6. Clean up multiple spaces and trim any leading/trailing spaces or separators.
+    // 4. Final cleanup: collapse multiple spaces and trim.
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;

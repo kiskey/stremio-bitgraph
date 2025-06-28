@@ -17,7 +17,7 @@ export async function addMagnet(magnetLink, apiKey) {
         const response = await rd.post('/torrents/addMagnet', formData, getAuthHeader(apiKey));
         return response.data;
     } catch (error) {
-        logger.error(`RD Error adding magnet: ${error.response?.data?.error || error.message}`);
+        logger.error(`[RD] Error adding magnet: ${error.response?.data?.error || error.message}`);
         return null;
     }
 }
@@ -27,20 +27,20 @@ export async function getTorrentInfo(torrentId, apiKey) {
         const response = await rd.get(`/torrents/info/${torrentId}`, getAuthHeader(apiKey));
         return response.data;
     } catch (error) {
-        logger.error(`RD Error getting torrent info: ${error.response?.data?.error || error.message}`);
+        logger.error(`[RD] Error getting torrent info: ${error.response?.data?.error || error.message}`);
         return null;
     }
 }
 
 export async function selectFiles(torrentId, fileIds, apiKey) {
     const formData = new URLSearchParams();
-    formData.append('files', fileIds); // 'all' or comma-separated IDs
+    formData.append('files', fileIds); // Can be 'all' or comma-separated IDs
 
     try {
         await rd.post(`/torrents/selectFiles/${torrentId}`, formData, getAuthHeader(apiKey));
         return true;
     } catch (error) {
-        logger.error(`RD Error selecting files: ${error.response?.data?.error || error.message}`);
+        logger.error(`[RD] Error selecting files: ${error.response?.data?.error || error.message}`);
         return false;
     }
 }
@@ -53,15 +53,17 @@ export async function unrestrictLink(link, apiKey) {
         const response = await rd.post('/unrestrict/link', formData, getAuthHeader(apiKey));
         return response.data;
     } catch (error) {
-        logger.error(`RD Error unrestricting link: ${error.response?.data?.error || error.message}`);
+        logger.error(`[RD] Error unrestricting link: ${error.response?.data?.error || error.message}`);
         return null;
     }
 }
 
 export async function pollTorrentUntilReady(torrentId, apiKey) {
+    // Adjusted polling to time out around the 3-minute mark
     let attempts = 0;
-    const maxAttempts = 30; // 5 minutes with increasing delay
-    let delay = 2000; // Start with 2 seconds
+    const maxAttempts = 12; // 12 attempts
+    let delay = 5000; // Start with 5 seconds
+    const maxDelay = 20000; // Cap at 20 seconds
 
     while (attempts < maxAttempts) {
         const torrentInfo = await getTorrentInfo(torrentId, apiKey);
@@ -69,23 +71,20 @@ export async function pollTorrentUntilReady(torrentId, apiKey) {
             throw new Error('Failed to get torrent info during polling.');
         }
 
-        // Check for error states
         if (['magnet_error', 'error', 'dead'].includes(torrentInfo.status)) {
             throw new Error(`Torrent failed on Real-Debrid with status: ${torrentInfo.status}`);
         }
 
-        // Success state
         if (torrentInfo.status === 'downloaded') {
-            logger.info(`Torrent ${torrentId} is ready.`);
+            logger.info(`[RD] Torrent ${torrentId} is ready.`);
             return torrentInfo;
         }
 
-        // Still processing, wait and retry
-        logger.info(`Polling RD for torrent ${torrentId}, status: ${torrentInfo.status}, attempt ${attempts + 1}/${maxAttempts}`);
+        logger.debug(`[RD] Polling for torrent ${torrentId}, status: ${torrentInfo.status}, attempt ${attempts + 1}/${maxAttempts}`);
         await sleep(delay);
-        delay = Math.min(delay * 1.5, 20000); // Exponential backoff with a cap
+        delay = Math.min(delay * 1.5, maxDelay); // Exponential backoff
         attempts++;
     }
 
-    throw new Error('Torrent polling timed out after several attempts.');
+    throw new Error('Torrent polling timed out after ~3 minutes.');
 }

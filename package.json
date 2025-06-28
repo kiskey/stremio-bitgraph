@@ -24,7 +24,7 @@
     "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
-    "parse-torrent-title": "^0.0.6",
+    "parse-torrent-title": "^1.4.0",
     "string-similarity": "^4.0.4",
     "winston": "^3.13.0",
     "express": "^4.19.2",        

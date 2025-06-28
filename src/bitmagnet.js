@@ -2,20 +2,25 @@ import axios from 'axios';
 import { BITMAGNET_GRAPHQL_ENDPOINT } from '../config.js';
 import { logger } from './utils.js';
 
+// --- CORRECTED GRAPHQL QUERY ---
+// This now matches the nested structure of the provided schema.
 const torrentContentSearchQuery = `
 query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
   torrentContent {
     search(input: $input) {
       items {
         infoHash
-        name
-        size
+        title
         seeders
         leechers
-        filesStatus
-        filesCount
         videoResolution
         languages { id }
+        torrent {
+          name
+          size
+          filesStatus
+          filesCount
+        }
       }
     }
   }
@@ -44,6 +49,11 @@ async function queryGraphQL(query, variables) {
         if (response.data.errors) {
             throw new Error(response.data.errors.map(e => e.message).join(', '));
         }
+        // Add a check for empty or null data
+        if (!response.data || !response.data.data) {
+            logger.warn('[BITMAGNET] Received empty data object from GraphQL server.');
+            return null;
+        }
         return response.data.data;
     } catch (error) {
         const errorMessage = error.response ? `Request failed with status code ${error.response.status}` : error.message;
@@ -61,7 +71,12 @@ export async function searchTorrents(searchString) {
             facets: { contentType: { filter: ["tv_show"] } }
         }
     });
-    return data ? data.torrentContent.search.items : [];
+    const items = data?.torrentContent?.search?.items;
+    if (!items) {
+        logger.warn(`[BITMAGNET] Search for "${searchString}" returned no items or unexpected structure.`);
+        return [];
+    }
+    return items;
 }
 
 export async function getTorrentFiles(infoHash) {
@@ -71,5 +86,10 @@ export async function getTorrentFiles(infoHash) {
             limit: 1000
         }
     });
-    return data ? data.torrent.files.items : [];
+    const items = data?.torrent?.files?.items;
+    if (!items) {
+        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items.`);
+        return [];
+    }
+    return items;
 }

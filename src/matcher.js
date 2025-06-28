@@ -30,14 +30,22 @@ export function findFileInTorrentInfo(torrentInfo, season, episode) {
     return null;
 }
 
-// Renamed for clarity
 export async function findBestSeriesStreams(tmdbShow, season, episode, newTorrents, cachedTorrents, preferredLanguages) {
     const streams = [];
     const cachedStreams = [];
 
     for (const torrent of cachedTorrents) {
-        if (findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode)) {
-            cachedStreams.push({ infoHash: torrent.infohash, torrentName: torrent.rd_torrent_info_json.filename, seeders: torrent.seeders, language: torrent.language, quality: torrent.quality, isCached: true });
+        const file = findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode);
+        if (file) {
+            cachedStreams.push({
+                infoHash: torrent.infohash,
+                torrentName: torrent.rd_torrent_info_json.filename,
+                seeders: torrent.seeders,
+                language: torrent.language,
+                quality: torrent.quality,
+                size: torrent.rd_torrent_info_json.bytes, // Get size from cached JSON
+                isCached: true,
+            });
         }
     }
 
@@ -50,7 +58,7 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
         const torrentInfo = PTT.parse(torrentData.name);
         if (torrentInfo.season === season && torrentInfo.episode === episode) {
-            streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), isCached: false });
+            streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
             continue;
         }
 
@@ -60,7 +68,7 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
             if (file.fileType !== 'video') continue;
             const fileInfo = PTT.parse(file.path);
             if (fileInfo.season === season && fileInfo.episode === episode) {
-                streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), isCached: false });
+                streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
                 break;
             }
         }
@@ -68,13 +76,20 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
     return { streams, cachedStreams };
 }
 
-// NEW: Dedicated matcher for movies
 export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrents, preferredLanguages) {
     const streams = [];
     const cachedStreams = [];
 
     for (const torrent of cachedTorrents) {
-        cachedStreams.push({ infoHash: torrent.infohash, torrentName: torrent.rd_torrent_info_json.filename, seeders: torrent.seeders, language: torrent.language, quality: torrent.quality, isCached: true });
+        cachedStreams.push({
+            infoHash: torrent.infohash,
+            torrentName: torrent.rd_torrent_info_json.filename,
+            seeders: torrent.seeders,
+            language: torrent.language,
+            quality: torrent.quality,
+            size: torrent.rd_torrent_info_json.bytes, // Get size from cached JSON
+            isCached: true,
+        });
     }
 
     const cachedInfoHashes = new Set(cachedTorrents.map(t => t.infohash));
@@ -88,7 +103,7 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
 
         if (titleSimilarity >= SIMILARITY_THRESHOLD && yearMatch) {
             const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-            streams.push({ infoHash: torrent.infoHash, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), isCached: false });
+            streams.push({ infoHash: torrent.infoHash, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
         }
     }
     return { streams, cachedStreams };
@@ -97,7 +112,6 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
 export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages) {
     let allStreams = [...cachedStreams, ...streams];
 
-    // NEW: Optional strict language filtering
     if (STRICT_LANGUAGE_FILTER && preferredLanguages.length > 0) {
         const prefLangSet = new Set(preferredLanguages);
         allStreams = allStreams.filter(stream => prefLangSet.has(stream.language));

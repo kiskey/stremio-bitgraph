@@ -153,12 +153,40 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
+
+// Helper for playing series episodes
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
-    // ... (This helper function remains the same)
+    const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
+        const fileInfo = PTT.parse(file.path);
+        return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
+    });
+
+    if (targetFileIndexInResponse === -1) {
+        throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list.`);
+    }
+    const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
+    if (!linkToUnrestrict) {
+        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+    }
+
+    const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
+    if (!unrestricted) throw new Error('Failed to unrestrict link.');
+
+    res.redirect(unrestricted.download);
 }
 
+// Helper for playing movies
 async function playFromReadyMovieTorrent(res, readyTorrent) {
-    // ... (This helper function remains the same)
+    // For movies, we assume the first link is the correct one.
+    const linkToUnrestrict = readyTorrent.links[0];
+    if (!linkToUnrestrict) {
+        throw new Error(`Could not find any links in the movie torrent.`);
+    }
+
+    const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
+    if (!unrestricted) throw new Error('Failed to unrestrict movie link.');
+
+    res.redirect(unrestricted.download);
 }
 
 

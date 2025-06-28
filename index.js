@@ -24,7 +24,7 @@ async function startApiServer() {
         const { imdbId_season_episode, infoHash } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
         
-        const processKey = `${infoHash}|series`; // Type-aware lock key
+        const processKey = `${infoHash}|series`;
         if (processingRequests.has(processKey)) {
             logger.warn(`[API] Request for series torrent ${infoHash} is already being processed. Awaiting result...`);
             try {
@@ -46,7 +46,6 @@ async function startApiServer() {
 
                 const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
                 
-                // Save with 'series' content_type
                 await pool.query(
                     `INSERT INTO torrents (infohash, tmdb_id, content_type, rd_torrent_info_json, language, quality, seeders)
                      VALUES ($1, $2, 'series', $3, $4, $5, $6)
@@ -77,7 +76,6 @@ async function startApiServer() {
         const { imdbId_season_episode, infoHash } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
         try {
-            // Query with 'series' content_type
             const { rows } = await pool.query("SELECT rd_torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = 'series'", [infoHash, imdbId]);
             if (rows.length === 0) throw new Error('Cached series torrent not found.');
             await playFromReadyTorrent(res, rows[0].rd_torrent_info_json, season, episode);
@@ -90,7 +88,7 @@ async function startApiServer() {
     app.get(`/${ADDON_ID}/process-new-movie/:imdbId/:infoHash`, async (req, res) => {
         const { imdbId, infoHash } = req.params;
 
-        const processKey = `${infoHash}|movie`; // Type-aware lock key
+        const processKey = `${infoHash}|movie`;
         if (processingRequests.has(processKey)) {
             try {
                 const readyTorrent = await processingRequests.get(processKey);
@@ -111,7 +109,6 @@ async function startApiServer() {
 
                 const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
                 
-                // Save with 'movie' content_type
                 await pool.query(
                     `INSERT INTO torrents (infohash, tmdb_id, content_type, rd_torrent_info_json, language, quality, seeders)
                      VALUES ($1, $2, 'movie', $3, $4, $5, $6)
@@ -141,7 +138,6 @@ async function startApiServer() {
     app.get(`/${ADDON_ID}/play-cached-movie/:imdbId/:infoHash`, async (req, res) => {
         const { imdbId, infoHash } = req.params;
         try {
-            // Query with 'movie' content_type
             const { rows } = await pool.query("SELECT rd_torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = 'movie'", [infoHash, imdbId]);
             if (rows.length === 0) throw new Error('Cached movie torrent not found.');
             await playFromReadyMovieTorrent(res, rows[0].rd_torrent_info_json);
@@ -153,39 +149,24 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
-
-// Helper for playing series episodes
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
         const fileInfo = PTT.parse(file.path);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
-
-    if (targetFileIndexInResponse === -1) {
-        throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list.`);
-    }
+    if (targetFileIndexInResponse === -1) throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list.`);
     const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
-    if (!linkToUnrestrict) {
-        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
-    }
-
+    if (!linkToUnrestrict) throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
     const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
     if (!unrestricted) throw new Error('Failed to unrestrict link.');
-
     res.redirect(unrestricted.download);
 }
 
-// Helper for playing movies
 async function playFromReadyMovieTorrent(res, readyTorrent) {
-    // For movies, we assume the first link is the correct one.
     const linkToUnrestrict = readyTorrent.links[0];
-    if (!linkToUnrestrict) {
-        throw new Error(`Could not find any links in the movie torrent.`);
-    }
-
+    if (!linkToUnrestrict) throw new Error(`Could not find any links in the movie torrent.`);
     const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
     if (!unrestricted) throw new Error('Failed to unrestrict movie link.');
-
     res.redirect(unrestricted.download);
 }
 
@@ -200,34 +181,52 @@ async function startAddonServer() {
 
         if (type === 'series') {
             const [imdbId, season, episode] = id.split(':');
-            // Query with 'series' content_type
             const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = 'series' AND rd_torrent_info_json IS NOT NULL", [imdbId]);
             const showDetails = await getShowDetails(imdbId);
             if (!showDetails) return { streams: [] };
 
             const searchString = `${showDetails.name} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-            const newTorrents = await searchTorrents(searchString);
+            // --- CORRECTED CALL FOR SERIES ---
+            const newTorrents = await searchTorrents(searchString, 'tv_show');
             
             const { streams, cachedStreams } = await matcher.findBestSeriesStreams(showDetails, parseInt(season), parseInt(episode), newTorrents, rows, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
             
-            return { streams: sortedStreams.map(s => ({ name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()}|${s.quality.toUpperCase()}`, title: `${s.torrentName}\n${s.seeders} seeders`, url: s.isCached ? `${APP_HOST}/${ADDON_ID}/play-cached-series/${id}/${s.infoHash}` : `${APP_HOST}/${ADDON_ID}/process-new-series/${id}/${s.infoHash}/${s.fileIndex}` })) };
+            logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for series ${id}`);
+            return {
+                streams: sortedStreams.map(s => ({
+                    name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
+                    title: `${s.torrentName}\n${s.seeders} seeders`,
+                    url: s.isCached
+                        ? `${APP_HOST}/${ADDON_ID}/play-cached-series/${id}/${s.infoHash}`
+                        : `${APP_HOST}/${ADDON_ID}/process-new-series/${id}/${s.infoHash}/${s.fileIndex}`
+                }))
+            };
         }
 
         if (type === 'movie') {
             const imdbId = id;
-            // Query with 'movie' content_type
             const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = 'movie' AND rd_torrent_info_json IS NOT NULL", [imdbId]);
             const movieDetails = await getMovieDetails(imdbId);
             if (!movieDetails) return { streams: [] };
 
             const searchString = movieDetails.title;
-            const newTorrents = await searchTorrents(searchString);
+            // --- CORRECTED CALL FOR MOVIES ---
+            const newTorrents = await searchTorrents(searchString, 'movie');
 
             const { streams, cachedStreams } = await matcher.findBestMovieStreams(movieDetails, newTorrents, rows, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
 
-            return { streams: sortedStreams.map(s => ({ name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()}|${s.quality.toUpperCase()}`, title: `${s.torrentName}\n${s.seeders} seeders`, url: s.isCached ? `${APP_HOST}/${ADDON_ID}/play-cached-movie/${id}/${s.infoHash}` : `${APP_HOST}/${ADDON_ID}/process-new-movie/${id}/${s.infoHash}` })) };
+            logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for movie ${id}`);
+            return {
+                streams: sortedStreams.map(s => ({
+                    name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
+                    title: `${s.torrentName}\n${s.seeders} seeders`,
+                    url: s.isCached
+                        ? `${APP_HOST}/${ADDON_ID}/play-cached-movie/${id}/${s.infoHash}`
+                        : `${APP_HOST}/${ADDON_ID}/process-new-movie/${id}/${s.infoHash}`
+                }))
+            };
         }
 
         return { streams: [] };
@@ -235,6 +234,7 @@ async function startAddonServer() {
 
     serveHTTP(builder.getInterface(), { port: PORT });
     logger.info(`[ADDON] Stremio addon server listening on http://127.0.0.1:${PORT}`);
+    logger.info(`[ADDON] To install, use: ${APP_HOST}/manifest.json`);
 }
 
 startApiServer();

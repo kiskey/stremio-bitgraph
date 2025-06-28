@@ -8,12 +8,15 @@ export const pool = new Pool({
     connectionString: DATABASE_URL,
 });
 
+// UPDATED: season_number and episode_number are now nullable to support movies.
 const CREATE_TABLE_QUERY = `
 CREATE TABLE IF NOT EXISTS torrents (
     id SERIAL PRIMARY KEY,
     infohash TEXT NOT NULL,
     tmdb_id TEXT NOT NULL,
     rd_torrent_info_json JSONB,
+    season_number INTEGER,
+    episode_number INTEGER,
     language TEXT NOT NULL,
     quality TEXT,
     seeders INTEGER,

@@ -12,9 +12,8 @@ const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
 /**
  * Fragment for TorrentContent fields.
- * CRITICAL FIX: This fragment has been fully reverted to precisely match the
- * user's provided "working" version, including all nested fields and
- * createdAt/updatedAt timestamps, to resolve the 422 error.
+ * FIX: Removed the 'releaseGroup' field, as it does not exist on the
+ * TorrentContent type in the provided schema, which was causing the query to fail.
  */
 const TORRENT_CONTENT_FIELDS_FRAGMENT = `
   fragment TorrentContentFields on TorrentContent {
@@ -38,7 +37,6 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     videoModifier
     videoResolution
     videoSource
-    releaseGroup
     seeders
     leechers
     publishedAt
@@ -121,7 +119,7 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
 
 /**
  * GraphQL query for searching torrent content.
- * Uses the fragment and includes totalCount and hasNextPage.
+ * Uses the corrected fragment and includes totalCount and hasNextPage.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
   ${TORRENT_CONTENT_FIELDS_FRAGMENT}
@@ -140,8 +138,8 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
 
 /**
  * GraphQL query for getting files within a specific torrent.
- * CRITICAL FIX: This query has been fully reverted to precisely match the
- * user's provided "working" version, using inline fields without extra fragments.
+ * FIX: Removed the 'extension' field, as it does not exist on the
+ * TorrentFile type in the provided schema.
  */
 const TORRENT_FILES_QUERY = `
   query TorrentFiles($input: TorrentFilesQueryInput!) {
@@ -151,7 +149,6 @@ const TORRENT_FILES_QUERY = `
           infoHash
           index
           path
-          extension
           fileType
           size
         }
@@ -205,6 +202,13 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
 
     if (!response || !response.data) {
         logger.error(`Bitmagnet API call for search query "${searchQuery}" returned an invalid or empty response object.`);
+        return [];
+    }
+
+    // Handle cases where the server returns errors in the JSON body
+    if (response.data.errors) {
+        logger.error(`Bitmagnet GraphQL API returned errors for query "${searchQuery}":`);
+        logger.error(JSON.stringify(response.data.errors, null, 2));
         return [];
     }
 
@@ -264,6 +268,13 @@ async function getTorrentFiles(infoHash) {
 
     if (!response || !response.data) {
         logger.error(`Bitmagnet API call for files of infoHash "${infoHash}" returned an invalid or empty response object.`);
+        return [];
+    }
+
+    // Handle cases where the server returns errors in the JSON body
+    if (response.data.errors) {
+        logger.error(`Bitmagnet GraphQL API returned errors for infoHash "${infoHash}":`);
+        logger.error(JSON.stringify(response.data.errors, null, 2));
         return [];
     }
 

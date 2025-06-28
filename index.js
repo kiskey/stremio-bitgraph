@@ -3,13 +3,14 @@
  * Main Stremio Addon Entry Point
  * Initializes the Express.js server for the Stremio addon, defines routes,
  * and orchestrates the content delivery using the Stremio Addon SDK's logic.
+ * All configuration is now sourced directly from environment variables via config.js.
  */
 
 const express = require('express');
 const cors = require('cors'); // For handling CORS requests from Stremio
 const { addonBuilder } = require('stremio-addon-sdk'); // We still use addonBuilder for defining handlers
 const manifest = require('./manifest');
-const config = require('./config');
+const config = require('./config'); // Now contains all config from env variables
 const { initializePg, query: dbQuery } = require('./db'); // Correctly import pg client functions
 const tmdb = require('./src/tmdb');
 const bitmagnet = require('./src/bitmagnet');
@@ -44,11 +45,14 @@ app.get('/manifest.json', (req, res) => {
 
 // 2. Stream Handler Route: /stream/:type/:id
 // Stremio client requests streams based on type (series) and ID (ttXXXXXX:S:E).
+// addonConfig (req.query) will now be empty or contain non-addon-specific query params.
 app.get('/stream/:type/:id', async (req, res) => {
   const { type, id } = req.params;
-  const addonConfig = req.query; // Stremio often passes config parameters as query strings for stream requests
+  // addonConfig is no longer used for core addon settings, as they are from environment variables.
+  // const addonConfig = req.query;
 
-  logger.info(`Stream request for type: ${type}, id: ${id}, config: ${JSON.stringify(addonConfig)}`);
+  logger.info(`Stream request for type: ${type}, id: ${id}`);
+  // Removed logging addonConfig as it will no longer contain sensitive API keys/user prefs.
 
   if (type !== 'series') {
     logger.debug('Ignoring non-series request. Only "series" type is supported.');
@@ -65,21 +69,21 @@ app.get('/stream/:type/:id', async (req, res) => {
     return res.json({ streams: [] });
   }
 
-  const realDebridApiKey = addonConfig.realDebridApiKey;
+  // Real-Debrid API Key is now directly from config (environment variable)
+  const realDebridApiKey = config.realDebridApiKey;
   if (!realDebridApiKey) {
-    logger.error('Real-Debrid API Key not provided in addon configuration.');
-    // Return an error stream or message to the user in Stremio
+    logger.error('Real-Debrid API Key is NOT configured in environment variables. Cannot provide Real-Debrid streams.');
     return res.json({
         streams: [],
-        error: "Real-Debrid API Key is missing in addon configuration."
+        error: "Real-Debrid API Key is missing. Please configure your addon's environment variables."
     });
   }
 
-  const preferredLanguages = addonConfig.preferredLanguages ?
-    addonConfig.preferredLanguages.split(',').map(lang => lang.trim().toLowerCase()) :
-    ['en'];
-  const minSeeders = addonConfig.minSeeders ? parseInt(addonConfig.minSeeders, 10) : config.minSeeders; // Ensure integer
-  const levenshteinThreshold = addonConfig.levenshteinThreshold ? parseInt(addonConfig.levenshteinThreshold, 10) : config.levenshteinThreshold; // Ensure integer
+  // All these parameters are now directly from config (environment variables)
+  const preferredLanguages = config.preferredLanguages;
+  const minSeeders = config.minSeeders;
+  const bitmagnetGraphQLEndpoint = config.bitmagnet.graphqlEndpoint;
+  const levenshteinThreshold = config.levenshteinThreshold;
 
 
   let tmdbShowDetails;
@@ -88,7 +92,7 @@ app.get('/stream/:type/:id', async (req, res) => {
 
   try {
     // 1. Get TMDB show details to find TMDB ID for the IMDb ID
-    // Use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
+    // Uses the server's TMDB_API_KEY from config.js (loaded from .env)
     const tmdbFindResponse = await axios.get(`${config.tmdb.baseUrl}/find/${imdbId}`, {
       params: {
         external_source: 'imdb_id',
@@ -104,6 +108,7 @@ app.get('/stream/:type/:id', async (req, res) => {
       return res.json({ streams: [] });
     }
 
+    // Uses the server's TMDB_API_KEY from config.js (loaded from .env)
     tmdbEpisodeDetails = await tmdb.getTvEpisodeDetails(tmdbShowDetails.id, seasonNumber, episodeNumber);
 
     if (!tmdbEpisodeDetails) {
@@ -149,7 +154,6 @@ app.get('/stream/:type/:id', async (req, res) => {
           name: `BMD - RD ⚡️`,
           description: streamMetadata.streamDescription,
           url: cachedTorrent.real_debrid_link,
-          // infoHash is intentionally removed here as it's a direct HTTP link, not a magnet.
           isCached: true
         }]
       });
@@ -165,7 +169,8 @@ app.get('/stream/:type/:id', async (req, res) => {
   const bitmagnetSearchQuery = `${tmdbShowTitle} S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
   let bitmagnetResults = [];
   try {
-    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders, preferredLanguages);
+    // Pass Bitmagnet endpoint from config
+    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders, preferredLanguages, bitmagnetGraphQLEndpoint);
     logger.info(`Bitmagnet returned ${bitmagnetResults.length} potential torrents for "${bitmagnetSearchQuery}".`);
   } catch (bitmagnetError) {
     logger.error(`Error searching Bitmagnet: ${bitmagnetError.message}`);
@@ -177,7 +182,8 @@ app.get('/stream/:type/:id', async (req, res) => {
     bitmagnetResults,
     tmdbEpisodeDetails,
     tmdbShowTitle,
-    preferredLanguages // Pass preferred languages to matcher for scoring
+    preferredLanguages,
+    levenshteinThreshold // Pass the threshold
   );
 
   const bestMatchedTorrent = scoredTorrents[0];
@@ -196,7 +202,8 @@ app.get('/stream/:type/:id', async (req, res) => {
   // Consolidate parameters into a single ID string for the realdebrid_proxy resource.
   const customResourceId = `${selectedTorrent.infoHash}_${matchedFileIndex || '0'}_${tmdbShowDetails.id}_${seasonNumber}_${episodeNumber}`;
   // Construct the FULLY QUALIFIED URL to our custom stream proxy endpoint
-  const streamUrl = `${config.appHost}/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
+  // RealDebridApiKey is NOT passed in URL query anymore, it's accessed from config.
+  const streamUrl = `${config.appHost}/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json`;
 
   const streamMetadata = formatStreamMetadata(
     parsedTorrentInfo, // Use parsed info from matcher
@@ -208,13 +215,11 @@ app.get('/stream/:type/:id', async (req, res) => {
     name: `BMG - RD - ${streamMetadata.streamTitle}`, // BMG - RD - Quality
     description: streamMetadata.streamDescription, // Season/Episode | seeders | language
     url: streamUrl,
-    // Removed infoHash here to ensure Stremio routes to our proxy, not tries direct torrent stream.
+    // infoHash is intentionally removed here to ensure Stremio routes to our proxy, not tries direct torrent stream.
   });
 
   // Sort final streams (if there were cached ones, they'd be added first)
   potentialStreams.sort((a, b) => {
-    // If a.isCached (which would be true only if a direct cached stream was found and returned earlier), prioritize.
-    // Otherwise, maintain order or apply secondary sorting if multiple deferred streams are generated.
     if (a.isCached && !b.isCached) return -1;
     if (!a.isCached && b.isCached) return 1;
     return 0;
@@ -228,7 +233,6 @@ app.get('/stream/:type/:id', async (req, res) => {
 // 3. Custom Real-Debrid Proxy Handler: /realdebrid_proxy/:id.json
 // This route will be hit when a user selects a deferred stream.
 app.get('/realdebrid_proxy/:id', async (req, res) => {
-  // CRITICAL DIAGNOSTIC LOG: This should appear immediately if the request hits the handler.
   logger.info(`--- REALDEBRID PROXY HIT ---`);
   logger.debug(`Request details: Path: ${req.path}, Params: ${JSON.stringify(req.params)}, Query: ${JSON.stringify(req.query)}`);
 
@@ -245,9 +249,10 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
   const episodeNumber = parseInt(episodeNumberStr, 10);
   const fileIndex = fileIndexStr === '0' ? 0 : parseInt(fileIndexStr, 10);
 
-  const realDebridApiKey = req.query.realDebridApiKey;
+  // Real-Debrid API Key is now directly from config (environment variable)
+  const realDebridApiKey = config.realDebridApiKey;
   if (!realDebridApiKey) {
-      logger.error('Real-Debrid API Key missing in deferred stream request query.');
+      logger.error('Real-Debrid API Key is NOT configured in environment variables. Cannot process Real-Debrid request.');
       return res.status(401).send('Unauthorized: Real-Debrid API Key required.');
   }
 
@@ -308,7 +313,8 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           // If RD torrent ID is not known from cache, add the magnet
           if (!rdAddedTorrentId) {
               const tmdbShowDetailsForMagnet = await tmdb.getTvShowDetails(tmdbId);
-              const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`"${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}"`);
+              // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
+              const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`"${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}"`, undefined, undefined, config.bitmagnet.graphqlEndpoint);
               const matchingTorrent = bitmagnetResultsForMagnet.find(t => t.infoHash === infoHash);
 
               if (!matchingTorrent || !matchingTorrent.magnetLink) {
@@ -318,10 +324,11 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
               const selectedTorrentMagnetUri = matchingTorrent.magnetLink;
               torrentNameForDb = matchingTorrent.name || matchingTorrent.title || 'Unknown Torrent Name';
               parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
-              languagePreferenceForDb = (matchingTorrent.languages && matchingTorrent.languages.length > 0 ? matchingTorrent.languages[0].id : null) || preferredLanguages[0] || 'en';
+              languagePreferenceForDb = (matchingTorrent.languages && matchingTorrent.languages.length > 0 ? matchingTorrent.languages[0].id : null) || config.preferredLanguages[0] || 'en';
               seedersForDb = matchingTorrent.seeders || 0;
 
               logger.info(`Adding magnet to Real-Debrid for infohash: ${infoHash}`);
+              // realDebridApiKey now comes from config
               const rdAddedTorrent = await realDebrid.addMagnet(realDebridApiKey, selectedTorrentMagnetUri);
 
               if (!rdAddedTorrent || !rdAddedTorrent.id) {
@@ -375,6 +382,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           // At this point, rdAddedTorrentId is guaranteed to be set
 
           logger.info(`Polling Real-Debrid for torrent completion for ${rdAddedTorrentId}...`);
+          // realDebridApiKey now comes from config
           torrentInfoAfterAdd = await realDebrid.pollForTorrentCompletion(realDebridApiKey, rdAddedTorrentId);
 
           if (!torrentInfoAfterAdd || !torrentInfoAfterAdd.links || torrentInfoAfterAdd.links.length === 0) {
@@ -383,6 +391,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           }
 
           logger.info(`Selecting files ${fileIndexStr} for torrent ${rdAddedTorrentId}.`);
+          // realDebridApiKey now comes from config
           await realDebrid.selectFiles(realDebridApiKey, rdAddedTorrentId, fileIndexStr);
 
           const rawRealDebridLink = torrentInfoAfterAdd.links[parseInt(fileIndexStr, 10)];
@@ -392,6 +401,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           }
 
           logger.info(`Unrestricting Real-Debrid link for file ${fileIndexStr}...`);
+          // realDebridApiKey now comes from config
           realDebridDirectLink = await realDebrid.unrestrictLink(realDebridApiKey, rawRealDebridLink);
 
           if (!realDebridDirectLink) {
@@ -401,22 +411,22 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
 
           // Update DB with the newly obtained direct link and full info
           try {
-              // Ensure we have current parsedInfoForDb and torrentNameForDb from initial retrieval or after addMagnet
               if (!parsedInfoForDb || !torrentNameForDb) {
-                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`);
+                 // Re-fetch torrent details from Bitmagnet if not available.
+                 // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
+                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`, undefined, undefined, config.bitmagnet.graphqlEndpoint);
                  const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => t.infoHash === infoHash);
 
                  if (preciseTorrentDetails) {
                      torrentNameForDb = preciseTorrentDetails.name || preciseTorrentDetails.title;
                      parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
-                     languagePreferenceForDb = (preciseTorrentDetails.languages && preciseTorrentDetails.languages.length > 0 ? preciseTorrentDetails.languages[0].id : null) || preferredLanguages[0] || 'en';
+                     languagePreferenceForDb = (preciseTorrentDetails.languages && preciseTorrentDetails.languages.length > 0 ? preciseTorrentDetails.languages[0].id : null) || config.preferredLanguages[0] || 'en';
                      seedersForDb = preciseTorrentDetails.seeders || 0;
                  } else {
                      logger.warn(`Could not find precise Bitmagnet details for infoHash ${infoHash} for DB persistence. Using fallback names.`);
                      torrentNameForDb = torrentInfoAfterAdd.original_filename || torrentInfoAfterAdd.filename || 'Unknown Torrent Name (Fallback)';
                      parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
-                     // Keep existing language/seeders or default if not found
-                     languagePreferenceForDb = languagePreferenceForDb || preferredLanguages[0] || 'en';
+                     languagePreferenceForDb = languagePreferenceForDb || config.preferredLanguages[0] || 'en';
                      seedersForDb = seedersForDb || 0;
                  }
               }

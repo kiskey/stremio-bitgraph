@@ -37,8 +37,8 @@ export function sanitizeName(name) {
         ' '
     );
 
-    // 3. Remove [ ... ] if it contains any non-ASCII character (i.e., non-English content)
-    sanitized = sanitized.replace(/\[[^\[\]]*[^\u0000-\u007F][^\[\]]*\]/g, ' ');
+    // 3. Remove [ ... ] if it contains any non-English (non-alphanumeric/dash/space) characters
+    sanitized = sanitized.replace(/\[.*?[^\w\s\-].*?\]/g, ' ');
 
     // 4. Remove URLs, domains, or emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
@@ -55,6 +55,7 @@ export function sanitizeName(name) {
 
     return sanitized;
 }
+
 
 
 

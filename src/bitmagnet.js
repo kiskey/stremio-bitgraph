@@ -10,9 +10,13 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
+// No longer need BITMAGNET_LANGUAGE_MAP as language filtering is client-side.
+
 /**
  * GraphQL fragment for common TorrentContent fields.
- * This aligns with the user's provided "working" query model and the Bitmagnet schema.
+ * CRITICAL FIX: Aligned precisely with the provided Bitmagnet schema.
+ * - 'magnetUri' is now correctly nested under 'torrent'.
+ * - 'files' field is removed from this fragment, as it's fetched via getTorrentFiles.
  */
 const TORRENT_CONTENT_FIELDS_FRAGMENT = `
   fragment TorrentContentFields on TorrentContent {
@@ -40,39 +44,79 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     seeders
     leechers
     publishedAt
-    magnetUri 
-    files { 
-      path
-      size
-      index
-      extension
-      fileType
-    }
-    torrent { 
+    createdAt
+    updatedAt
+    torrent { # Nested Torrent object
+      infoHash
       name
       size
+      filesStatus
+      filesCount
+      hasFilesInfo
+      singleFile
       fileType
+      sources {
+        key
+        name
+      }
+      seeders
+      leechers
       tagNames
-      # infoHash is directly on TorrentContent, no need to duplicate here
-      # magnetUri is directly on TorrentContent, no need to duplicate here
-      seeders # Seeders from torrent level if available
-      leechers # Leechers from torrent level if available
+      magnetUri # CRITICAL FIX: Correct location for magnetUri as per schema
+      createdAt
+      updatedAt
     }
-    content { 
+    content { # Nested Content object
+      type
       source
       id
+      metadataSource {
+        key
+        name
+      }
       title
       releaseDate
       releaseYear
-      runtime
       overview
-      externalLinks {
-        url
-      }
+      runtime
+      voteAverage
+      voteCount
       originalLanguage {
         id
         name
       }
+      attributes {
+        metadataSource {
+          key
+          name
+        }
+        source
+        key
+        value
+        createdAt
+        updatedAt
+      }
+      collections {
+        metadataSource {
+          key
+          name
+        }
+        type
+        source
+        id
+        name
+        createdAt
+        updatedAt
+      }
+      externalLinks {
+        metadataSource {
+          key
+          name
+        }
+        url
+      }
+      createdAt
+      updatedAt
     }
   }
 `;
@@ -87,31 +131,54 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
     torrentContent {
       search(input: $input) {
         items {
-          ...TorrentContentFields 
+          ...TorrentContentFields # Use the fragment here
         }
-        totalCount 
-        hasNextPage 
+        totalCount # Added as per user's working model
+        hasNextPage # Added as per user's working model
       }
     }
   }
 `;
 
 /**
+ * Fragment for TorrentFile fields.
+ */
+const TORRENT_FILE_FRAGMENT = `
+  fragment TorrentFileFields on TorrentFile {
+    infoHash
+    index
+    path
+    size
+    fileType
+    createdAt
+    updatedAt
+  }
+`;
+
+/**
+ * Fragment for TorrentFilesQueryResult.
+ */
+const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
+  ${TORRENT_FILE_FRAGMENT}
+  fragment TorrentFilesQueryResultFields on TorrentFilesQueryResult {
+    items {
+      ...TorrentFileFields
+    }
+    totalCount
+    hasNextPage
+  }
+`;
+
+/**
  * GraphQL query for getting files within a specific torrent.
- * Adjusted to match Bitmagnet's `torrent { files(input: $input) }` structure.
+ * Uses the TorrentFilesQueryResult fragment.
  */
 const TORRENT_FILES_QUERY = `
+  ${TORRENT_FILES_QUERY_RESULT_FRAGMENT}
   query TorrentFiles($input: TorrentFilesQueryInput!) {
     torrent {
       files(input: $input) {
-        items {
-          infoHash
-          index
-          path
-          extension
-          fileType
-          size
-        }
+        ...TorrentFilesQueryResultFields
       }
     }
   }
@@ -120,42 +187,44 @@ const TORRENT_FILES_QUERY = `
 
 /**
  * Searches for torrents on Bitmagnet.
- * @param {string} searchQuery - The search string (e.g., "Game of Thrones S01E01").
+ * @param {string} searchQuery - The search string (e.g., "Game of Thrones").
  * @param {number} minSeeders - Minimum seeders to filter results.
  * @returns {Promise<Array<object>>} An array of torrent objects from Bitmagnet.
  */
-async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferredLanguages from signature
+async function searchTorrents(searchQuery, minSeeders = 1) {
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
-    logger.error('Bitmagnet GraphQL endpoint is not configured. Please set BITMAGNET_GRAPHQL_ENDPOINT in your environment variables.');
+    logger.error('Bitmagnet GraphQL endpoint is not configured.');
     return [];
   }
 
-  logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
+  logger.info(`Searching Bitmagnet for query: "${searchQuery}"`);
   logger.debug(`Bitmagnet GraphQL endpoint being used for search: ${BITMAGNET_GRAPHQL_ENDPOINT}`);
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
       input: {
-        queryString: searchQuery,
+        queryString: searchQuery, // Only pass the show title here
+        limit: 50, // Limit to 50 results as requested
         orderBy: [
-          { field: 'seeders', descending: true } 
+          { field: 'seeders', descending: true }, // Order by highest seeders first
+          { field: 'published_at', descending: true } // Then by most recent published date
         ],
         facets: {
           contentType: {
-            filter: ['tv_show'] 
+            filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
           }
         }
       },
     },
   };
 
-  logger.debug(`Bitmagnet GraphQL Request Payload: ${JSON.stringify(payload, null, 2)}`); // Log the full payload
+  logger.debug(`Bitmagnet GraphQL Request Payload: ${JSON.stringify(payload, null, 2)}`);
 
   try {
     const response = await retryWithExponentialBackoff(
-      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload), // Use the prepared payload
-      config.retry // Using general retry config
+      async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
+      config.bitmagnet.retry
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -169,7 +238,6 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
     logger.debug(`Bitmagnet search found ${torrents.length} torrents.`);
     logger.debug(`Bitmagnet raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
 
-
     // Client-side filtering for minSeeders (still good practice)
     return torrents.filter(torrent => torrent.seeders >= minSeeders);
 
@@ -178,9 +246,9 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
     if (error.response) {
       logger.error('Bitmagnet HTTP Response Status:', error.response.status);
       logger.error('Bitmagnet HTTP Response Headers:', error.response.headers);
-      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2));
       if (error.response.data && error.response.data.errors) {
-        logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2)); // Log GraphQL specific errors
+        logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2));
       }
     } else if (error.request) {
       logger.error('Bitmagnet Request was made but no response was received (network issue, CORS, etc.):', error.request);
@@ -193,13 +261,12 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
 
 /**
  * Fetches files for a specific torrent infohash from Bitmagnet.
- * This is crucial for matching episodes within season packs.
  * @param {string} infoHash - The infohash of the torrent.
  * @returns {Promise<Array<object>>} An array of file objects for the torrent.
  */
 async function getTorrentFiles(infoHash) {
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
-    logger.error('Bitmagnet GraphQL endpoint is not configured. Please set BITMAGNET_GRAPHQL_ENDPOINT in your environment variables.');
+    logger.error('Bitmagnet GraphQL endpoint is not configured.');
     return [];
   }
 
@@ -209,8 +276,8 @@ async function getTorrentFiles(infoHash) {
   const payload = {
     query: TORRENT_FILES_QUERY,
     variables: {
-      input: { // Wrap infoHash in an 'input' object
-        infoHashes: [infoHash], // Expects an array of infoHashes
+      input: {
+        infoHashes: [infoHash],
       },
     },
   };
@@ -219,7 +286,7 @@ async function getTorrentFiles(infoHash) {
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
-      config.retry // Using general retry config
+      config.bitmagnet.retry
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -228,7 +295,6 @@ async function getTorrentFiles(infoHash) {
         return [];
     }
 
-    // Access files through torrent.files.items based on the new schema structure
     const files = response.data.data?.torrent?.files?.items || [];
     logger.debug(`Found ${files.length} files for infohash ${infoHash}.`);
     logger.debug(`Bitmagnet torrent files raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
@@ -239,7 +305,7 @@ async function getTorrentFiles(infoHash) {
     if (error.response) {
       logger.error('Bitmagnet HTTP Response Status:', error.response.status);
       logger.error('Bitmagnet HTTP Response Headers:', error.response.headers);
-      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2)); // Log full response data
+      logger.error('Bitmagnet HTTP Response Data:', JSON.stringify(error.response.data, null, 2));
       if (error.response.data && error.response.data.errors) {
         logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2));
       }

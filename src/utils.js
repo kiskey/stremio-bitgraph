@@ -28,30 +28,26 @@ export function formatSize(bytes) {
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove anything inside the special CJK brackets 【】
+    // 1. Remove anything inside special CJK brackets 【】
     sanitized = sanitized.replace(/【.*?】/g, ' ');
 
-    // 2. Remove any sequences of non-Latin characters
+    // 2. Remove sequences of non-Latin script characters
     sanitized = sanitized.replace(
         /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+/gu,
         ' '
     );
 
-    // 3. Remove bracketed metadata that includes any non-Latin characters (even with digits)
-  sanitized = sanitized.replace(
-    /\[[^\[\]]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}][^\[\]]*\]/gu,
-    ' '
-);
+    // 3. Remove [ ... ] if it contains any non-ASCII character (i.e., non-English content)
+    sanitized = sanitized.replace(/\[[^\[\]]*[^\u0000-\u007F][^\[\]]*\]/g, ' ');
 
-
-    // 4. Remove URLs, domain names, or emails
+    // 4. Remove URLs, domains, or emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
 
-    // 4b. Clean up leftover standalone punctuation (hyphens, dashes) after domain removal
+    // 4b. Clean up stray hyphens or dashes left from domain removal
     sanitized = sanitized.replace(/^\s*[-–—]+\s*|\s*[-–—]+\s*$/g, ' ');
     sanitized = sanitized.replace(/\s+[-–—]+\s+/g, ' ');
 
-    // 5. Replace separators like . and _ with space (keep hyphen, it’s often meaningful)
+    // 5. Replace . and _ with space (but keep -)
     sanitized = sanitized.replace(/[._]/g, ' ');
 
     // 6. Collapse multiple spaces and trim
@@ -59,6 +55,7 @@ export function sanitizeName(name) {
 
     return sanitized;
 }
+
 
 
 

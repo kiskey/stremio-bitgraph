@@ -60,17 +60,19 @@ async function queryGraphQL(query, variables) {
     }
 }
 
-export async function searchTorrents(searchString) {
+// --- CORRECTED FUNCTION SIGNATURE AND LOGIC ---
+// It now accepts a contentType to correctly filter the search.
+export async function searchTorrents(searchString, contentType = 'tv_show') {
+    logger.debug(`[BITMAGNET] Searching for contentType: "${contentType}"`);
     const data = await queryGraphQL(torrentContentSearchQuery, {
         input: {
             queryString: searchString,
             limit: 100,
-            // CORRECTED: Sort by newest first, then by seeders as a tie-breaker.
             orderBy: [
                 { field: 'published_at', descending: true },
                 { field: 'seeders', descending: true }
             ],
-            facets: { contentType: { filter: ["tv_show"] } }
+            facets: { contentType: { filter: [contentType] } }
         }
     });
     const items = data?.torrentContent?.search?.items;

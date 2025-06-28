@@ -1,14 +1,16 @@
 /**
  * index.js
  * Main Stremio Addon Entry Point
- * Initializes the Stremio addon, defines stream handlers, and orchestrates the content delivery.
+ * Initializes the Express.js server for the Stremio addon, defines routes,
+ * and orchestrates the content delivery using the Stremio Addon SDK's logic.
  */
 
-// Corrected: addonBuilder is likely a named export along with serveHTTP and get
-const { serveHTTP, get, addonBuilder } = require('stremio-addon-sdk');
+const express = require('express');
+const cors = require('cors'); // For handling CORS requests from Stremio
+const { addonBuilder } = require('stremio-addon-sdk'); // We still use addonBuilder for defining handlers
 const manifest = require('./manifest');
 const config = require('./config');
-const { initializePg, query: dbQuery } = require('./db');
+const { initializePg, query: dbQuery } = require('./db'); // Correctly import pg client functions
 const tmdb = require('./src/tmdb');
 const bitmagnet = require('./src/bitmagnet');
 const realDebrid = require('./src/realdebrid');
@@ -19,96 +21,57 @@ const axios = require('axios'); // Import axios for direct TMDB find call
 // Initialize PostgreSQL connection pool on startup
 initializePg();
 
+// Create the addon builder - we use this to define our handlers,
+// but we will expose them via Express.
 const builder = new addonBuilder(manifest);
 
-/**
- * Helper function to format stream names and descriptions.
- * @param {object} parsedInfo - Parsed torrent/file info from parse-torrent-title.
- * @param {object} torrentItem - The original Bitmagnet torrent item.
- * @param {Array<string>} preferredLanguages - User's preferred languages.
- * @returns {object} { streamTitle, streamDescription }
- */
-function formatStreamMetadata(parsedInfo, torrentItem, preferredLanguages) {
-    let quality = parsedInfo.resolution || parsedInfo.quality || 'Unknown Quality';
-    if (parsedInfo.hdr) quality += ' HDR';
-    if (parsedInfo.dolbyvision) quality += ' DV';
-    if (parsedInfo.codec) quality += ` (${parsedInfo.codec.toUpperCase()})`; // Make codec uppercase
+// Initialize Express app
+const app = express();
 
-    const seeders = torrentItem.seeders || 0;
+// Use CORS middleware to allow cross-origin requests from Stremio
+// Stremio will typically run on a different origin than your addon.
+app.use(cors());
 
-    let language = 'Unknown Language';
-    // Prioritize language from Bitmagnet's content metadata (more reliable)
-    if (torrentItem.languages && torrentItem.languages.length > 0) {
-        language = torrentItem.languages[0].name || torrentItem.languages[0].id;
-        // Map common language codes to more readable names
-        if (language === 'en') language = 'English';
-        if (language === 'tam') language = 'Tamil';
-    } else if (parsedInfo.languages && parsedInfo.languages.length > 0) {
-        // Fallback to ptt parsed language
-        language = parsedInfo.languages[0];
-        if (language === 'eng') language = 'English'; // ptt might return 'eng'
-        if (language === 'hin') language = 'Hindi'; // example
-    } else {
-        // As a last resort, if preferred languages include English, assume English
-        if (preferredLanguages.includes('en') || preferredLanguages.includes('eng')) {
-            language = 'English';
-        }
-    }
+// --- Define Express Routes for Stremio Addon ---
 
-    // Determine episode/season info for the description
-    let episodeInfo = '';
-    if (parsedInfo.season && parsedInfo.episode) {
-        if (Array.isArray(parsedInfo.episode)) {
-            episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${parsedInfo.episode.map(e => String(e).padStart(2, '0')).join('-')})}`;
-        } else if (parsedInfo.range) {
-             episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${String(parsedInfo.range.start).padStart(2, '0')}-E${String(parsedInfo.range.end).padStart(2, '0')}`;
-        }
-        else {
-            episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${String(parsedInfo.episode).padStart(2, '0')}`;
-        }
-    } else if (parsedInfo.season && (parsedInfo.isCompleteSeason || parsedInfo.seasonpack)) {
-        episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')} (Pack)`;
-    } else if (parsedInfo.season) { // Just a season without specific episode/pack flag, assume pack
-        episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')} (Potential Pack)`;
-    } else { // No season/episode info in parsed torrent/file name
-        episodeInfo = 'Episode Match'; // It's a file match, but we don't have SxE info from its name
-    }
+// 1. Manifest Route: /manifest.json
+// Stremio client fetches this to learn about the addon's capabilities.
+app.get('/manifest.json', (req, res) => {
+  logger.info('Manifest requested.');
+  res.setHeader('Content-Type', 'application/json');
+  res.json(manifest);
+});
 
+// 2. Stream Handler Route: /stream/:type/:id
+// Stremio client requests streams based on type (series) and ID (ttXXXXXX:S:E).
+app.get('/stream/:type/:id', async (req, res) => {
+  const { type, id } = req.params;
+  const addonConfig = req.query; // Stremio often passes config parameters as query strings for stream requests
 
-    const streamTitle = `${quality}`; // Quality only for the 'BMG - RD - Quality' name
-    const streamDescription = `${episodeInfo} | Seeders: ${seeders} | Lang: ${language}`;
-
-    return { streamTitle, streamDescription };
-}
-
-
-// --- Define the main Stream Handler ---
-builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   logger.info(`Stream request for type: ${type}, id: ${id}, config: ${JSON.stringify(addonConfig)}`);
 
   if (type !== 'series') {
-    logger.debug('Ignoring non-series request.');
-    return Promise.resolve({ streams: [] });
+    logger.debug('Ignoring non-series request. Only "series" type is supported.');
+    return res.json({ streams: [] });
   }
 
+  // Parse Stremio ID (e.g., 'tt123456:1:1' -> IMDb ID, Season, Episode)
   const [imdbId, seasonNumberStr, episodeNumberStr] = id.split(':');
   const seasonNumber = parseInt(seasonNumberStr, 10);
   const episodeNumber = parseInt(episodeNumberStr, 10);
 
   if (!imdbId || isNaN(seasonNumber) || isNaN(episodeNumber)) {
     logger.error(`Invalid Stremio ID format: ${id}`);
-    return Promise.resolve({ streams: [] });
+    return res.json({ streams: [] });
   }
 
   const realDebridApiKey = addonConfig.realDebridApiKey;
   if (!realDebridApiKey) {
-    logger.error('Real-Debrid API Key not provided in addon configuration. Cannot provide Real-Debrid streams.');
-    return Promise.resolve({
-      streams: [{
-        name: 'Error',
-        description: 'Real-Debrid API Key missing. Please configure the addon.',
-        url: 'magnet:?xt=urn:btih:0000000000000000000000000000000000000000'
-      }]
+    logger.error('Real-Debrid API Key not provided in addon configuration.');
+    // Return an error stream or message to the user in Stremio
+    return res.json({
+        streams: [],
+        error: "Real-Debrid API Key is missing in addon configuration."
     });
   }
 
@@ -124,176 +87,168 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
   let tmdbShowTitle;
 
   try {
-    logger.debug(`Fetching TMDB show details for IMDb ID: ${imdbId}`);
+    // 1. Get TMDB show details to find TMDB ID for the IMDb ID
+    // Use TMDB's `find` endpoint to convert IMDb ID to TMDB ID.
     const tmdbFindResponse = await axios.get(`${config.tmdb.baseUrl}/find/${imdbId}`, {
       params: {
         external_source: 'imdb_id',
         api_key: config.tmdb.apiKey,
       }
     });
-    logger.debug(`TMDB Find API response data: ${JSON.stringify(tmdbFindResponse.data)}`);
-
 
     if (tmdbFindResponse.data && tmdbFindResponse.data.tv_results && tmdbFindResponse.data.tv_results.length > 0) {
       tmdbShowDetails = tmdbFindResponse.data.tv_results[0];
       tmdbShowTitle = tmdbShowDetails.name;
-      logger.info(`Found TMDB Show: "${tmdbShowTitle}" (TMDB ID: ${tmdbShowDetails.id})`);
     } else {
       logger.error(`Could not find TMDB show details for IMDb ID: ${imdbId}`);
-      return Promise.resolve({ streams: [] });
+      return res.json({ streams: [] });
     }
 
-    logger.debug(`Fetching TMDB episode details for TMDB ID: ${tmdbShowDetails.id}, Season: ${seasonNumber}, Episode: ${episodeNumber}`);
     tmdbEpisodeDetails = await tmdb.getTvEpisodeDetails(tmdbShowDetails.id, seasonNumber, episodeNumber);
-    logger.debug(`TMDB Episode details: ${JSON.stringify(tmdbEpisodeDetails)}`);
 
     if (!tmdbEpisodeDetails) {
       logger.error(`Could not retrieve TMDB details for S${seasonNumber}E${episodeNumber} of ${tmdbShowTitle} (TMDB ID: ${tmdbShowDetails.id})`);
-      return Promise.resolve({ streams: [] });
+      return res.json({ streams: [] });
     }
   } catch (tmdbError) {
-    logger.error(`Error fetching TMDB data: ${tmdbError.message}`, tmdbError);
-    return Promise.resolve({ streams: [] });
+    logger.error(`Error fetching TMDB data: ${tmdbError.message}`);
+    return res.json({ streams: [] });
   }
 
-  const potentialStreams = []; // Array to hold all potential streams
-
-  // --- 1. Check for directly cached episode stream ---
+  // 2. Check local database (cache) for existing torrent
+  let cachedTorrent = null;
   try {
-    logger.info(`Checking database cache for direct episode link for S${seasonNumber}E${episodeNumber} of "${tmdbShowTitle}"`);
-    const resEpisodeCache = await dbQuery( // Using dbQuery (pg)
+    logger.info(`Checking database cache for S${seasonNumber}E${episodeNumber} of "${tmdbShowTitle}"`);
+    const resDb = await dbQuery(
       `SELECT * FROM torrents
-       WHERE tmdb_id = $1 AND season_number = $2 AND episode_number = $3 AND real_debrid_link IS NOT NULL
-       ORDER BY added_at DESC
+       WHERE "tmdb_id" = $1 AND "season_number" = $2 AND "episode_number" = $3 AND "real_debrid_link" IS NOT NULL
+       ORDER BY "added_at" DESC
        LIMIT 1`,
       [tmdbShowDetails.id.toString(), seasonNumber, episodeNumber]
     );
-    if (resEpisodeCache.rows.length > 0) {
-      const cachedTorrent = resEpisodeCache.rows[0];
-      logger.info(`Found cached direct stream for S${seasonNumber}E${episodeNumber}: ${cachedTorrent.real_debrid_link}`);
 
+    if (resDb.rows.length > 0) {
+      cachedTorrent = resDb.rows[0];
+      // Ensure parsed_info_json is parsed if it's stored as text
+      if (typeof cachedTorrent.parsed_info_json === 'string') {
+          cachedTorrent.parsed_info_json = JSON.parse(cachedTorrent.parsed_info_json);
+      }
+    }
+
+    if (cachedTorrent) {
+      logger.info(`Found cached stream for S${seasonNumber}E${episodeNumber}: ${cachedTorrent.real_debrid_link}`);
+      
       const streamMetadata = formatStreamMetadata(
-        cachedTorrent.parsed_info_json, // Pass parsed_info_json from DB
-        { seeders: cachedTorrent.seeders, languages: [{ id: cachedTorrent.language_preference }] }, // Mock torrentItem for formatting
+        cachedTorrent.parsed_info_json,
+        { seeders: cachedTorrent.seeders, languages: [{ id: cachedTorrent.language_preference }] },
         preferredLanguages
       );
 
-      potentialStreams.push({
-        name: `BMD - RD ⚡️`,
-        description: streamMetadata.streamDescription,
-        url: cachedTorrent.real_debrid_link,
-        // Removed infoHash here as it's a direct HTTP link, not a magnet.
-        isCached: true
+      return res.json({
+        streams: [{
+          name: `BMD - RD ⚡️`,
+          description: streamMetadata.streamDescription,
+          url: cachedTorrent.real_debrid_link,
+          // infoHash is intentionally removed here as it's a direct HTTP link, not a magnet.
+          isCached: true
+        }]
       });
-    } else {
-        logger.info(`No cached direct stream found for S${seasonNumber}E${episodeNumber}.`);
     }
+    logger.info(`No cached stream found for S${seasonNumber}E${episodeNumber} of "${tmdbShowTitle}". Searching Bitmagnet...`);
+
   } catch (dbError) {
-    logger.error('Error during direct episode database cache check:', dbError.message, dbError);
+    logger.error('Error querying database:', dbError.message);
+    // Continue to search Bitmagnet even if DB lookup fails
   }
 
-  // --- 2. Search Bitmagnet for new torrents ---
-  logger.info(`Proceeding to search Bitmagnet for new torrents.`);
-  const bitmagnetSearchQuery = `"${tmdbShowTitle}"`; // Search only by title
+  // 3. Search Bitmagnet for torrents
+  const bitmagnetSearchQuery = `${tmdbShowTitle} S${String(seasonNumber).padStart(2, '0')}E${String(episodeNumber).padStart(2, '0')}`;
   let bitmagnetResults = [];
   try {
-    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders);
+    bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders, preferredLanguages);
+    logger.info(`Bitmagnet returned ${bitmagnetResults.length} potential torrents for "${bitmagnetSearchQuery}".`);
   } catch (bitmagnetError) {
-    logger.error(`Error searching Bitmagnet: ${bitmagnetError.message}`, bitmagnetError);
+    logger.error(`Error searching Bitmagnet: ${bitmagnetError.message}`);
+    return res.json({ streams: [] });
   }
 
+  // 4. Intelligent Torrent Matching
   const scoredTorrents = await matcher.findBestTorrentMatch(
     bitmagnetResults,
     tmdbEpisodeDetails,
     tmdbShowTitle,
+    preferredLanguages // Pass preferred languages to matcher for scoring
+  );
+
+  const bestMatchedTorrent = scoredTorrents[0];
+
+  if (!bestMatchedTorrent || bestMatchedTorrent.score <= -Infinity) {
+    logger.warn(`No suitable torrent found after intelligent matching for S${seasonNumber}E${episodeNumber} of "${tmdbShowTitle}".`);
+    return res.json({ streams: [] });
+  }
+
+  const { torrent: selectedTorrent, matchedFileIndex, parsedInfo: parsedTorrentInfo } = bestMatchedTorrent;
+  logger.info(`Selected best torrent: "${selectedTorrent.name}" (Score: ${bestMatchedTorrent.score})`);
+  logger.info(`Matched file index: ${matchedFileIndex}`);
+
+  const potentialStreams = [];
+  // For non-cached streams, prepare the Real-Debrid proxy URL
+  // Consolidate parameters into a single ID string for the realdebrid_proxy resource.
+  const customResourceId = `${selectedTorrent.infoHash}_${matchedFileIndex || '0'}_${tmdbShowDetails.id}_${seasonNumber}_${episodeNumber}`;
+  // Construct the FULLY QUALIFIED URL to our custom stream proxy endpoint
+  const streamUrl = `${config.appHost}/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
+
+  const streamMetadata = formatStreamMetadata(
+    parsedTorrentInfo, // Use parsed info from matcher
+    selectedTorrent, // Pass original torrent item for seeders/languages
     preferredLanguages
   );
 
-  // --- 3. Process top scored torrents for deferred streams ---
-  // Limit to a few top results to avoid overwhelming Stremio or Real-Debrid.
-  const topTorrentsToOffer = scoredTorrents.slice(0, 5); // Offer top 5 results
+  potentialStreams.push({
+    name: `BMG - RD - ${streamMetadata.streamTitle}`, // BMG - RD - Quality
+    description: streamMetadata.streamDescription, // Season/Episode | seeders | language
+    url: streamUrl,
+    // Removed infoHash here to ensure Stremio routes to our proxy, not tries direct torrent stream.
+  });
 
-  for (const bestMatchedTorrent of topTorrentsToOffer) {
-    const selectedTorrentName = bestMatchedTorrent.torrent.torrent ?
-                                    bestMatchedTorrent.torrent.torrent.name :
-                                    bestMatchedTorrent.torrent.title || 'Unknown Torrent Name';
-    const { torrent: selectedTorrentItem, matchedFileIndex, parsedInfo: parsedTorrentInfo } = bestMatchedTorrent;
-    const selectedTorrentInfoHash = selectedTorrentItem.torrent ? selectedTorrentItem.torrent.infoHash : selectedTorrentItem.infoHash;
-
-    // Skip if this torrent (infoHash) already has a direct cached link
-    // This avoids offering a "deferred" option if an "instant" option is already present
-    if (potentialStreams.some(s => s.infoHash === selectedTorrentInfoHash && s.isCached)) {
-        logger.debug(`Skipping deferred stream for ${selectedTorrentInfoHash} as a direct cached stream is already offered.`);
-        continue;
-    }
-
-    // Consolidate parameters into a single ID string for the realdebrid_proxy resource.
-    const customResourceId = `${selectedTorrentInfoHash}_${matchedFileIndex || '0'}_${tmdbShowDetails.id}_${seasonNumber}_${episodeNumber}`;
-    // Construct the FULLY QUALIFIED URL to our custom stream proxy endpoint
-    const streamUrl = `${config.appHost}/realdebrid_proxy/${encodeURIComponent(customResourceId)}.json?realDebridApiKey=${encodeURIComponent(realDebridApiKey)}`;
-
-    const streamMetadata = formatStreamMetadata(
-      parsedTorrentInfo, // Use parsed info from matcher
-      selectedTorrentItem, // Pass original torrent item for seeders/languages
-      preferredLanguages
-    );
-
-    potentialStreams.push({
-      name: `BMG - RD - ${streamMetadata.streamTitle}`, // BMG - RD - Quality
-      description: streamMetadata.streamDescription, // Season/Episode | seeders | language
-      url: streamUrl,
-      // Removed infoHash here to ensure Stremio routes to our proxy, not tries direct torrent stream.
-    });
-  }
-
-  // Sort final streams: cached first, then by score for deferred streams
+  // Sort final streams (if there were cached ones, they'd be added first)
   potentialStreams.sort((a, b) => {
+    // If a.isCached (which would be true only if a direct cached stream was found and returned earlier), prioritize.
+    // Otherwise, maintain order or apply secondary sorting if multiple deferred streams are generated.
     if (a.isCached && !b.isCached) return -1;
     if (!a.isCached && b.isCached) return 1;
-    // For non-cached, sort by the original score (if available, otherwise default)
-    // You might need to add `score` to the stream object in `potentialStreams` for this.
-    // For now, simple alphabetical or original order if scores aren't transferred.
     return 0;
   });
 
-
   logger.info(`Returning ${potentialStreams.length} stream(s) to Stremio.`);
-  return Promise.resolve({ streams: potentialStreams });
+  res.json({ streams: potentialStreams });
 });
 
-// --- Define the custom HTTP handler for on-demand Real-Debrid processing ---
-// This acts as a proxy that Stremio will hit when a user selects a deferred stream.
-// Changed resource name from 'stream' to 'realdebrid_proxy' to avoid conflict
-builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) => {
+
+// 3. Custom Real-Debrid Proxy Handler: /realdebrid_proxy/:id.json
+// This route will be hit when a user selects a deferred stream.
+app.get('/realdebrid_proxy/:id', async (req, res) => {
   // CRITICAL DIAGNOSTIC LOG: This should appear immediately if the request hits the handler.
   logger.info(`--- REALDEBRID PROXY HIT ---`);
-  logger.debug(`Request details: Path: ${request.path}, ID: ${request.id}, Query: ${JSON.stringify(request.query)}`);
+  logger.debug(`Request details: Path: ${req.path}, Params: ${JSON.stringify(req.params)}, Query: ${JSON.stringify(req.query)}`);
 
-
-  // Parse the custom URL path. request.id contains the encodedCustomId.
-  const customResourceId = decodeURIComponent(request.id);
+  // Parse the custom URL parameters from req.params.id
+  const customResourceId = decodeURIComponent(req.params.id.replace('.json', '')); // Strip .json suffix
   const [infoHash, fileIndexStr, tmdbId, seasonNumberStr, episodeNumberStr] = customResourceId.split('_');
 
   if (!infoHash || !fileIndexStr || !tmdbId || !seasonNumberStr || !episodeNumberStr) {
       logger.error(`Invalid custom resource ID received: ${customResourceId}`);
-      response.writeHead(400, { 'Content-Type': 'text/plain' });
-      response.end('Bad Request: Invalid stream parameters.');
-      return;
+      return res.status(400).send('Bad Request: Invalid stream parameters.');
   }
 
   const seasonNumber = parseInt(seasonNumberStr, 10);
   const episodeNumber = parseInt(episodeNumberStr, 10);
-
-  // fileIndex can be '0' if no specific index was matched, meaning main/largest file
   const fileIndex = fileIndexStr === '0' ? 0 : parseInt(fileIndexStr, 10);
 
-  // Real-Debrid API Key passed as query parameter
-  const realDebridApiKey = request.query.realDebridApiKey;
+  const realDebridApiKey = req.query.realDebridApiKey;
   if (!realDebridApiKey) {
-      logger.error('Real-Debrid API Key missing in deferred stream request.');
-      response.writeHead(401, { 'Content-Type': 'text/plain' });
-      response.end('Unauthorized: Real-Debrid API Key required.');
-      return;
+      logger.error('Real-Debrid API Key missing in deferred stream request query.');
+      return res.status(401).send('Unauthorized: Real-Debrid API Key required.');
   }
 
   logger.info(`Processing deferred stream request for infoHash: ${infoHash}, fileIndex: ${fileIndex}, Episode: S${seasonNumber}E${episodeNumber}`);
@@ -303,28 +258,35 @@ builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) 
   let torrentInfoAfterAdd = null;
   let torrentNameForDb = null;
   let parsedInfoForDb = null;
+  let languagePreferenceForDb = null;
+  let seedersForDb = null;
 
   try {
       // 1. Check local DB cache for any existing Real-Debrid entry for this infoHash
       let cachedTorrentEntry = null;
       try {
-          const res = await dbQuery(
-              `SELECT real_debrid_torrent_id, real_debrid_info_json, real_debrid_link, real_debrid_file_id, torrent_name, parsed_info_json FROM torrents
-               WHERE infohash = $1
+          const resDb = await dbQuery(
+              `SELECT "real_debrid_torrent_id", "real_debrid_info_json", "real_debrid_link", "real_debrid_file_id", "torrent_name", "parsed_info_json", "language_preference", "seeders" FROM torrents
+               WHERE "infohash" = $1
                LIMIT 1`,
               [infoHash]
           );
-          if (res.rows.length > 0) {
-              cachedTorrentEntry = res.rows[0];
+          if (resDb.rows.length > 0) {
+              cachedTorrentEntry = resDb.rows[0];
               rdAddedTorrentId = cachedTorrentEntry.real_debrid_torrent_id;
               torrentNameForDb = cachedTorrentEntry.torrent_name;
               parsedInfoForDb = cachedTorrentEntry.parsed_info_json;
+              languagePreferenceForDb = cachedTorrentEntry.language_preference;
+              seedersForDb = cachedTorrentEntry.seeders;
               try {
-                  if (cachedTorrentEntry.real_debrid_info_json) {
+                  // pg driver might return JSONB as object directly, or string if column is text.
+                  if (typeof cachedTorrentEntry.real_debrid_info_json === 'string') {
                     torrentInfoAfterAdd = JSON.parse(cachedTorrentEntry.real_debrid_info_json);
+                  } else {
+                    torrentInfoAfterAdd = cachedTorrentEntry.real_debrid_info_json;
                   }
               } catch (e) {
-                  logger.warn(`Failed to parse cached real_debrid_info_json for ${infoHash}. Will re-fetch.`);
+                  logger.warn(`Failed to parse cached real_debrid_info_json for ${infoHash}. Will re-fetch. Error: ${e.message}`);
                   torrentInfoAfterAdd = null;
               }
 
@@ -338,180 +300,162 @@ builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) 
               }
           }
       } catch (dbError) {
-          logger.error(`Error during deferred stream DB lookup for ${infoHash}: ${dbError.message}`);
-          // If DB lookup fails, we proceed as if nothing is cached, but won't re-add if rdAddedTorrentId is already set
+          logger.error(`Error during deferred stream DB lookup for ${infoHash}: ${dbError.message}`, dbError);
       }
 
       // If no direct link obtained from cache, proceed with RD calls
       if (!realDebridDirectLink) {
           // If RD torrent ID is not known from cache, add the magnet
           if (!rdAddedTorrentId) {
-              // --- Idempotency point for addMagnet ---
-              // Attempt to add magnet. If Real-Debrid already has it, it should return the existing ID.
               const tmdbShowDetailsForMagnet = await tmdb.getTvShowDetails(tmdbId);
               const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`"${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}"`);
-              const matchingTorrent = bitmagnetResultsForMagnet.find(t => (t.torrent ? t.torrent.infoHash : t.infoHash) === infoHash);
+              const matchingTorrent = bitmagnetResultsForMagnet.find(t => t.infoHash === infoHash);
 
-              if (!matchingTorrent || !(matchingTorrent.torrent ? matchingTorrent.torrent.magnetUri : null)) {
+              if (!matchingTorrent || !matchingTorrent.magnetLink) {
                   logger.error(`Magnet URI not found for infoHash ${infoHash}. Cannot add to Real-Debrid.`);
-                  response.writeHead(404, { 'Content-Type': 'text/plain' });
-                  response.end('Stream Not Found: Magnet URI could not be retrieved.');
-                  return;
+                  return res.status(404).send('Stream Not Found: Magnet URI could not be retrieved.');
               }
-              const selectedTorrentMagnetUri = matchingTorrent.torrent.magnetUri;
-              torrentNameForDb = matchingTorrent.torrent ? matchingTorrent.torrent.name : matchingTorrent.title || 'Unknown Torrent Name';
-              parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb);
+              const selectedTorrentMagnetUri = matchingTorrent.magnetLink;
+              torrentNameForDb = matchingTorrent.name || matchingTorrent.title || 'Unknown Torrent Name';
+              parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
+              languagePreferenceForDb = (matchingTorrent.languages && matchingTorrent.languages.length > 0 ? matchingTorrent.languages[0].id : null) || preferredLanguages[0] || 'en';
+              seedersForDb = matchingTorrent.seeders || 0;
 
               logger.info(`Adding magnet to Real-Debrid for infohash: ${infoHash}`);
               const rdAddedTorrent = await realDebrid.addMagnet(realDebridApiKey, selectedTorrentMagnetUri);
 
               if (!rdAddedTorrent || !rdAddedTorrent.id) {
                   logger.error('Failed to add magnet to Real-Debrid or missing torrent ID from response.');
-                  response.writeHead(500, { 'Content-Type': 'text/plain' });
-                  response.end('Error: Failed to add torrent to Real-Debrid.');
-                  return;
+                  return res.status(500).send('Error: Failed to add torrent to Real-Debrid.');
               }
               rdAddedTorrentId = rdAddedTorrent.id;
 
-              // Immediately try to persist the torrent ID to DB to handle concurrent requests
+              // Use INSERT ... ON CONFLICT DO UPDATE to handle concurrency
               try {
                 await dbQuery(
                     `INSERT INTO torrents (
-                         infohash, tmdb_id, season_number, episode_number, torrent_name,
-                         parsed_info_json, real_debrid_torrent_id, last_checked_at
-                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                     ON CONFLICT (infohash) DO UPDATE SET
-                         real_debrid_torrent_id = EXCLUDED.real_debrid_torrent_id,
-                         last_checked_at = NOW();`,
+                         "infohash", "tmdb_id", "season_number", "episode_number", "torrent_name",
+                         "parsed_info_json", "real_debrid_torrent_id", "real_debrid_file_id", "language_preference", "seeders", "added_at", "last_checked_at"
+                     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+                     ON CONFLICT ("infohash") DO UPDATE SET
+                         "real_debrid_torrent_id" = EXCLUDED."real_debrid_torrent_id",
+                         "last_checked_at" = NOW(),
+                         "torrent_name" = EXCLUDED."torrent_name",
+                         "parsed_info_json" = EXCLUDED."parsed_info_json",
+                         "language_preference" = EXCLUDED."language_preference",
+                         "seeders" = EXCLUDED."seeders";`,
                     [
                         infoHash, tmdbId, seasonNumber, episodeNumber, torrentNameForDb,
-                        JSON.stringify(parsedInfoForDb || {}), rdAddedTorrentId
+                        JSON.stringify(parsedInfoForDb || {}), rdAddedTorrentId, fileIndexStr,
+                        languagePreferenceForDb, seedersForDb
                     ]
                 );
-                logger.info(`Torrent ID ${rdAddedTorrentId} for ${infoHash} persisted/updated in DB.`);
-              } catch (dbInsertError) {
-                  // E.g., duplicate key error if another concurrent request just added it
-                  logger.warn(`Failed to immediately persist torrent ID for ${infoHash} (likely a concurrent request). Re-fetching from DB.`);
+                logger.info(`Torrent ID ${rdAddedTorrentId} for ${infoHash} persisted/updated in DB via ON CONFLICT.`);
+              } catch (dbInsertConflictError) {
+                  logger.warn(`Failed to immediately persist torrent ID for ${infoHash} (likely a concurrent request). Re-fetching from DB. Error: ${dbInsertConflictError.message}`);
                   // If insert failed due to conflict, another process wrote it. Re-fetch.
                   const resConflict = await dbQuery(
-                      `SELECT real_debrid_torrent_id, torrent_name, parsed_info_json FROM torrents WHERE infohash = $1 LIMIT 1`,
+                      `SELECT "real_debrid_torrent_id", "torrent_name", "parsed_info_json", "language_preference", "seeders" FROM torrents WHERE "infohash" = $1 LIMIT 1`,
                       [infoHash]
                   );
                   if (resConflict.rows.length > 0) {
                       rdAddedTorrentId = resConflict.rows[0].real_debrid_torrent_id;
                       torrentNameForDb = resConflict.rows[0].torrent_name;
                       parsedInfoForDb = resConflict.rows[0].parsed_info_json;
+                      languagePreferenceForDb = resConflict.rows[0].language_preference;
+                      seedersForDb = resConflict.rows[0].seeders;
                       logger.info(`Retrieved RD Torrent ID ${rdAddedTorrentId} from DB after concurrent add conflict.`);
                   } else {
                       logger.error(`Concurrent add conflict, but could not retrieve torrent ID for ${infoHash} from DB.`);
-                      response.writeHead(500, { 'Content-Type': 'text/plain' });
-                      response.end('Error: Failed to establish Real-Debrid torrent ID.');
-                      return;
+                      return res.status(500).send('Error: Failed to establish Real-Debrid torrent ID.');
                   }
               }
           }
 
-          // At this point, rdAddedTorrentId is guaranteed to be set (either from cache or after adding)
+          // At this point, rdAddedTorrentId is guaranteed to be set
 
-          // Poll for torrent completion (this is where the waiting happens)
           logger.info(`Polling Real-Debrid for torrent completion for ${rdAddedTorrentId}...`);
           torrentInfoAfterAdd = await realDebrid.pollForTorrentCompletion(realDebridApiKey, rdAddedTorrentId);
 
           if (!torrentInfoAfterAdd || !torrentInfoAfterAdd.links || torrentInfoAfterAdd.links.length === 0) {
               logger.error('Torrent did not complete or no links available on Real-Debrid after polling.');
-              response.writeHead(500, { 'Content-Type': 'text/plain' });
-              response.end('Error: Real-Debrid torrent not ready or failed to retrieve links.');
-              return;
+              return res.status(500).send('Error: Real-Debrid torrent not ready or failed to retrieve links.');
           }
 
-          // Select files (even if already selected, harmless to call again)
-          // `fileIndexStr` can be '0' which is fine for selectFiles
           logger.info(`Selecting files ${fileIndexStr} for torrent ${rdAddedTorrentId}.`);
           await realDebrid.selectFiles(realDebridApiKey, rdAddedTorrentId, fileIndexStr);
 
-          // Get the specific link for the desired fileIndex
           const rawRealDebridLink = torrentInfoAfterAdd.links[parseInt(fileIndexStr, 10)];
           if (!rawRealDebridLink) {
               logger.error(`Raw Real-Debrid link not found for file index ${fileIndexStr}.`);
-              response.writeHead(404, { 'Content-Type': 'text/plain' });
-              response.end('Error: Specific file link not found on Real-Debrid.');
-              return;
+              return res.status(404).send('Error: Specific file link not found on Real-Debrid.');
           }
 
-          // Unrestrict the link
           logger.info(`Unrestricting Real-Debrid link for file ${fileIndexStr}...`);
           realDebridDirectLink = await realDebrid.unrestrictLink(realDebridApiKey, rawRealDebridLink);
 
           if (!realDebridDirectLink) {
               logger.error('Failed to unrestrict Real-Debrid link.');
-              response.writeHead(500, { 'Content-Type': 'text/plain' });
-              response.end('Error: Failed to unrestrict Real-Debrid link.');
-              return;
+              return res.status(500).send('Error: Failed to unrestrict Real-Debrid link.');
           }
 
           // Update DB with the newly obtained direct link and full info
           try {
               // Ensure we have current parsedInfoForDb and torrentNameForDb from initial retrieval or after addMagnet
               if (!parsedInfoForDb || !torrentNameForDb) {
-                 // Re-fetch torrent details from Bitmagnet if not available.
-                 // This search by infoHash is approximate, assumes Bitmagnet can return details for a specific infoHash.
-                 // A more direct Bitmagnet API call for `torrent_by_infohash` would be ideal if available.
                  const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`);
-                 const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => (t.torrent ? t.torrent.infoHash : t.infoHash) === infoHash);
+                 const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => t.infoHash === infoHash);
 
                  if (preciseTorrentDetails) {
-                     torrentNameForDb = preciseTorrentDetails.torrent ? preciseTorrentDetails.torrent.name : preciseTorrentDetails.title;
-                     parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb);
+                     torrentNameForDb = preciseTorrentDetails.name || preciseTorrentDetails.title;
+                     parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
+                     languagePreferenceForDb = (preciseTorrentDetails.languages && preciseTorrentDetails.languages.length > 0 ? preciseTorrentDetails.languages[0].id : null) || preferredLanguages[0] || 'en';
+                     seedersForDb = preciseTorrentDetails.seeders || 0;
                  } else {
                      logger.warn(`Could not find precise Bitmagnet details for infoHash ${infoHash} for DB persistence. Using fallback names.`);
                      torrentNameForDb = torrentInfoAfterAdd.original_filename || torrentInfoAfterAdd.filename || 'Unknown Torrent Name (Fallback)';
                      parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
+                     // Keep existing language/seeders or default if not found
+                     languagePreferenceForDb = languagePreferenceForDb || preferredLanguages[0] || 'en';
+                     seedersForDb = seedersForDb || 0;
                  }
               }
 
               const rdInfoJsonString = JSON.stringify(torrentInfoAfterAdd);
 
-              // Update or insert the torrent info, including the specific episode link
+              // Update the record with the full Real-Debrid link and info
               await dbQuery(
-                  `INSERT INTO torrents (
-                       infohash, tmdb_id, season_number, episode_number, torrent_name,
-                       parsed_info_json, real_debrid_torrent_id, real_debrid_file_id,
-                       real_debrid_link, real_debrid_info_json, last_checked_at
-                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-                   ON CONFLICT (infohash) DO UPDATE SET
-                       tmdb_id = EXCLUDED.tmdb_id,
-                       season_number = EXCLUDED.season_number,
-                       episode_number = EXCLUDED.episode_number,
-                       torrent_name = EXCLUDED.torrent_name,
-                       parsed_info_json = EXCLUDED.parsed_info_json,
-                       real_debrid_torrent_id = EXCLUDED.real_debrid_torrent_id,
-                       real_debrid_file_id = EXCLUDED.real_debrid_file_id,
-                       real_debrid_link = EXCLUDED.real_debrid_link,
-                       real_debrid_info_json = EXCLUDED.real_debrid_info_json,
-                       last_checked_at = NOW();`,
+                  `UPDATE torrents
+                   SET "tmdb_id" = $1, "season_number" = $2, "episode_number" = $3, "torrent_name" = $4,
+                       "parsed_info_json" = $5, "real_debrid_torrent_id" = $6, "real_debrid_file_id" = $7,
+                       "real_debrid_link" = $8, "real_debrid_info_json" = $9, "last_checked_at" = NOW(),
+                       "language_preference" = $10, "seeders" = $11
+                   WHERE "infohash" = $12;`,
                   [
-                      infoHash, tmdbId, seasonNumber, episodeNumber, torrentNameForDb,
-                      JSON.stringify(parsedInfoForDb || {}), rdAddedTorrentId, fileIndexStr,
-                      realDebridDirectLink, rdInfoJsonString
+                      tmdbId, seasonNumber, episodeNumber, torrentNameForDb,
+                      JSON.stringify(parsedInfoForDb), rdAddedTorrentId, fileIndexStr,
+                      realDebridDirectLink, rdInfoJsonString,
+                      languagePreferenceForDb, seedersForDb,
+                      infoHash
                   ]
               );
-              logger.info(`Database updated for infoHash ${infoHash} with direct link.`);
+              logger.info(`Database updated for infoHash ${infoHash} with direct link and full RD info.`);
           } catch (dbPersistError) {
               logger.error('Error persisting torrent to database during deferred stream processing:', dbPersistError.message, dbPersistError);
           }
       }
 
-      // Finally, redirect to the direct Real-Debrid link
       logger.info(`Redirecting to direct Real-Debrid link: ${realDebridDirectLink.substring(0, 50)}...`);
-      response.writeHead(302, { Location: realDebridDirectLink }); // HTTP 302 Found or 307 Temporary Redirect
-      response.end();
-
+      res.redirect(302, realDebridDirectLink); // Use res.redirect for 302
   } catch (err) {
       logger.error(`Unhandled error in deferred stream handler for ${infoHash}: ${err.message}`, err.stack, err);
-      response.writeHead(500, { 'Content-Type': 'text/plain' });
-      response.end(`Internal Server Error: ${err.message}`);
+      res.status(500).send(`Internal Server Error: ${err.message}`);
   }
 });
 
-serveHTTP(builder.getInterface(), { port: config.port });
-logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);
+
+// Start the Express server
+app.listen(config.port, () => {
+  logger.info(`Stremio Real-Debrid Addon listening on port ${config.port}`);
+  logger.info(`HTTP addon accessible at: ${config.appHost}/manifest.json`);
+});

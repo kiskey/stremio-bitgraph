@@ -20,15 +20,15 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "pg": "^8.12.0",              <!-- pg library for PostgreSQL -->
+    "pg": "^8.12.0",             
     "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.7.2",
     "dotenv": "^16.4.5",
     "parse-torrent-title": "^0.0.6",
     "string-similarity": "^4.0.4",
     "winston": "^3.13.0",
-    "express": "^4.19.2",         <!-- Express.js for web server -->
-    "cors": "^2.8.5"              <!-- CORS middleware for Express -->
+    "express": "^4.19.2",        
+    "cors": "^2.8.5"             
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

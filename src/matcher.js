@@ -10,25 +10,19 @@ function getTitleSimilarity(tmdbTitle, torrentName) {
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
 }
 
-// --- UPDATED LANGUAGE DETECTION ---
-function getBestLanguage(torrentLanguages, preferredLanguages) {
-    // Case 1: Torrent has no language data from Bitmagnet. Default to 'en'.
+// --- CORRECTED: Export the function so it can be used by other modules ---
+export function getBestLanguage(torrentLanguages, preferredLanguages) {
     if (!torrentLanguages || torrentLanguages.length === 0) {
         return 'en';
     }
-
-    // Case 2: User has provided preferences. Find the best match.
     if (preferredLanguages.length > 0) {
         const torrentLangCodes = new Set(torrentLanguages.map(l => l.id));
         for (const prefLang of preferredLanguages) {
             if (torrentLangCodes.has(prefLang)) {
-                return prefLang; // Return highest-priority match
+                return prefLang;
             }
         }
     }
-
-    // Case 3: User has no preferences, OR their preferences didn't match.
-    // In this case, just return the first language the torrent actually lists.
     return torrentLanguages[0].id;
 }
 
@@ -132,7 +126,6 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
     const getLangPriority = (lang) => langIndexMap.has(lang) ? langIndexMap.get(lang) : Infinity;
 
     const sortFn = (a, b) => {
-        // --- CORRECTED: Only sort by language if preferences are provided ---
         if (preferredLanguages.length > 0) {
             const langPriorityA = getLangPriority(a.language);
             const langPriorityB = getLangPriority(b.language);
@@ -141,7 +134,6 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
             }
         }
 
-        // Fallback sorting for all cases (no preference, or same preference)
         const qualityA = QUALITY_ORDER[a.quality] || 99;
         const qualityB = QUALITY_ORDER[b.quality] || 99;
         if (qualityA !== qualityB) {

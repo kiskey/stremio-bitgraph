@@ -4,13 +4,12 @@ dotenv.config();
 // Server and Addon Configuration
 export const PORT = parseInt(process.env.PORT) || 7000;
 export const API_PORT = PORT + 1; // Internal port for the API server
-
-// The external-facing URL MUST point to the API server for callbacks
 export const APP_HOST = process.env.APP_HOST || `http://127.0.0.1:${API_PORT}`;
+export const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // 'debug', 'info', 'warn', 'error'
 
 export const ADDON_ID = 'org.stremio.realdebrid.bitmagnet';
 export const ADDON_NAME = 'Bitmagnet RD (Env)';
-export const ADDON_VERSION = '1.2.0'; // Version bump for new architecture
+export const ADDON_VERSION = '1.3.0'; // Version bump for new features
 
 // Service API Keys and Endpoints
 export const REALDEBRID_API_KEY = process.env.REALDEBRID_API_KEY;

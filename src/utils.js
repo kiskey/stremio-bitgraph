@@ -1,7 +1,6 @@
 import winston from 'winston';
 import { LOG_LEVEL } from '../config.js';
 
-// Setup logger with configurable level
 export const logger = winston.createLogger({
     level: LOG_LEVEL,
     format: winston.format.combine(
@@ -18,27 +17,40 @@ export const logger = winston.createLogger({
     ],
 });
 
-// Sleep utility for exponential backoff
 export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- NEW: Helper function to format file size ---
 export function formatSize(bytes) {
-    if (!bytes || bytes === 0) {
-        return 'N/A';
-    }
-    const gb = bytes / 1e9; // 1 billion bytes = 1 GB
+    if (!bytes || bytes === 0) return 'N/A';
+    const gb = bytes / 1e9;
     return `${gb.toFixed(2)} GB`;
 }
 
-// Quality sorting map
+// --- NEW: Sanitization function to clean torrent names ---
+export function sanitizeName(name) {
+    let sanitized = name;
+
+    // 1. Remove CJK (Chinese, Japanese, Korean) characters and other common non-ASCII symbols
+    sanitized = sanitized.replace(/[\u3000-\u303f\u3040-\u309f\u30a0-\u30ff\uff00-\uffef\u4e00-\u9faf\u3400-\u4dbf]/g, ' ');
+
+    // 2. Remove common URL patterns (e.g., www.domain.com, domain.org)
+    sanitized = sanitized.replace(/www\.\S+\.\w+/g, ' ');
+
+    // 3. Remove bracketed release group info and other fluff (e.g., [TTHDTT.com], [ExYuSubs])
+    sanitized = sanitized.replace(/\[.*?\]/g, ' ');
+    sanitized = sanitized.replace(/【.*?】/g, ' ');
+
+    // 4. Replace common separators with spaces to help PTT
+    sanitized = sanitized.replace(/[._-]/g, ' ');
+
+    // 5. Clean up multiple spaces
+    sanitized = sanitized.replace(/\s+/g, ' ').trim();
+
+    return sanitized;
+}
+
+
 export const QUALITY_ORDER = {
-    '4k': 1,
-    '2160p': 1,
-    '1080p': 2,
-    '720p': 3,
-    '480p': 4,
-    '360p': 5,
-    'sd': 6,
+    '4k': 1, '2160p': 1, '1080p': 2, '720p': 3, '480p': 4, '360p': 5, 'sd': 6,
 };
 
 export const getQuality = (resolution) => {

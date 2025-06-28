@@ -2,16 +2,13 @@ import PTT from 'parse-torrent-title';
 import stringSimilarity from 'string-similarity';
 import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
-// --- Import the new sanitizeName function ---
 import { logger, QUALITY_ORDER, getQuality, sanitizeName } from './utils.js';
 
-// --- UPDATED: Use the sanitizeName function before parsing and comparing ---
 function getTitleSimilarity(tmdbTitle, torrentName) {
     if (!tmdbTitle) return 0;
-    const sanitized = sanitizeName(torrentName);
-    const parsed = PTT.parse(sanitized);
+    // The sanitization is now done *before* this function is called.
+    const parsed = PTT.parse(torrentName);
     if (!parsed.title) return 0;
-    // Compare the clean TMDB title with the title parsed from the *sanitized* name
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
 }
 
@@ -28,7 +25,6 @@ export function getBestLanguage(torrentLanguages, preferredLanguages) {
 
 export function findFileInTorrentInfo(torrentInfo, season, episode) {
     for (const file of torrentInfo.files) {
-        // Also sanitize file paths before parsing
         const fileInfo = PTT.parse(sanitizeName(file.path));
         if (fileInfo.season === season && fileInfo.episode === episode) return file;
     }
@@ -51,15 +47,21 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        logger.debug(`[MATCHER-SERIES] Evaluating new torrent: "${torrentData.name}"`);
-        if (getTitleSimilarity(tmdbShow.name, torrentData.name) < SIMILARITY_THRESHOLD) {
+        // --- NEW ROBUST LOGIC ---
+        logger.debug(`[MATCHER-SERIES] Evaluating torrent: "${torrentData.name}"`);
+        const sanitizedName = sanitizeName(torrentData.name);
+        logger.debug(`[MATCHER-SERIES] -> Sanitized to: "${sanitizedName}"`);
+
+        const titleSimilarity = getTitleSimilarity(tmdbShow.name, sanitizedName);
+        logger.debug(`[MATCHER-SERIES] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
+
+        if (titleSimilarity < SIMILARITY_THRESHOLD) {
             logger.debug(`[MATCHER-SERIES] -> REJECTED: Low title similarity.`);
             continue;
         }
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-        // Also sanitize before this PTT call
-        const torrentInfo = PTT.parse(sanitizeName(torrentData.name));
+        const torrentInfo = PTT.parse(sanitizedName);
         if (torrentInfo.season === season && torrentInfo.episode === episode) {
             logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
@@ -71,7 +73,6 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         if (!files || files.length === 0) continue;
         for (const file of files) {
             if (file.fileType !== 'video') continue;
-            // Also sanitize file paths before parsing
             const fileInfo = PTT.parse(sanitizeName(file.path));
             if (fileInfo.season === season && fileInfo.episode === episode) {
                 logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
@@ -97,16 +98,19 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
+        // --- APPLYING THE SAME ROBUST LOGIC TO MOVIES ---
         logger.debug(`[MATCHER-MOVIE] Evaluating new torrent: "${torrentData.name}"`);
+        const sanitizedName = sanitizeName(torrentData.name);
+        logger.debug(`[MATCHER-MOVIE] -> Sanitized to: "${sanitizedName}"`);
 
-        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, torrentData.name);
+        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, sanitizedName);
         logger.debug(`[MATCHER-MOVIE] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
         if (titleSimilarity < SIMILARITY_THRESHOLD) {
             logger.debug(`[MATCHER-MOVIE] -> REJECTED: Low title similarity.`);
             continue;
         }
 
-        const parsedInfo = PTT.parse(sanitizeName(torrentData.name));
+        const parsedInfo = PTT.parse(sanitizedName);
         const tmdbYear = new Date(tmdbMovie.release_date).getFullYear();
         const yearMatch = !parsedInfo.year || parsedInfo.year == tmdbYear;
         logger.debug(`[MATCHER-MOVIE] -> Year match: ${yearMatch} (Torrent: ${parsedInfo.year || 'N/A'}, TMDB: ${tmdbYear})`);

@@ -25,33 +25,30 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- FINAL, ROBUST, AND CORRECT SANITIZATION FUNCTION ---
 export function sanitizeName(name) {
     let sanitized = name;
 
     // 1. Remove anything inside the special CJK brackets 【】
     sanitized = sanitized.replace(/【.*?】/g, ' ');
 
-    // 2. Remove any "words" that are composed entirely of CJK characters.
-    // This correctly removes "金妮与乔治娅" and "第三季" but leaves "Ginny" alone.
-    // It requires the /u flag for Unicode property escapes to work.
-    sanitized = sanitized.replace(/\b\p{Script=Han}+\b/gu, ' ');
+    // 2. Remove any continuous block of non-Latin characters (CJK, Arabic, Cyrillic, Thai, etc.)
+    sanitized = sanitized.replace(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+/gu, ' ');
 
-    // 3. Remove any bracketed text that looks like metadata (e.g., [简繁英字幕], [全10集])
-    // by targeting brackets that contain CJK characters.
-    sanitized = sanitized.replace(/\[\s*[^a-zA-Z]*\p{Script=Han}[^a-zA-Z]*\s*\]/gu, ' ');
+    // 3. Remove bracketed text that contains non-Latin scripts
+    sanitized = sanitized.replace(/\[\s*[^a-zA-Z]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+[^a-zA-Z]*\s*\]/gu, ' ');
 
-    // 4. Remove any remaining domain names or email addresses.
+    // 4. Remove URLs, domains, emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
 
-    // 5. Replace common separators with spaces. We leave '-' alone as it can be part of release groups.
+    // 5. Replace separators like '.' and '_' with spaces (keep '-' as it can be part of release names)
     sanitized = sanitized.replace(/[._]/g, ' ');
 
-    // 6. Final cleanup: collapse multiple spaces and trim.
+    // 6. Collapse multiple spaces and trim
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;
 }
+
 
 
 export const QUALITY_ORDER = {

@@ -17,12 +17,10 @@ import PTT from 'parse-torrent-title';
 const processingTorrents = new Set();
 
 // --- API SERVER (Express) ---
-// This server's ONLY job is to handle the Real-Debrid callbacks.
 async function startApiServer() {
     const app = express();
     app.use(cors());
 
-    // All API endpoints remain the same...
     app.get(`/${ADDON_ID}/process-new/:imdbId_season_episode/:infoHash/:fileIndex`, async (req, res) => {
         const { imdbId_season_episode, infoHash, fileIndex } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
@@ -57,10 +55,26 @@ async function startApiServer() {
                 [infoHash, imdbId, readyTorrent, language, quality, readyTorrent.seeders]
             );
 
-            const fileToPlay = matcher.findFileInTorrentInfo(readyTorrent, parseInt(season, 10), parseInt(episode, 10));
-            if (!fileToPlay) throw new Error(`Could not find S${season}E${episode} in the downloaded torrent pack.`);
+            // --- THE DEFINITIVE LOGIC FOR FILE/LINK MAPPING ---
+            // Step 1: Find the index of the file we want by parsing the 'path' of each file in the 'files' array.
+            const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
+                const fileInfo = PTT.parse(file.path);
+                return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
+            });
 
-            const unrestricted = await rd.unrestrictLink(fileToPlay.link, REALDEBRID_API_KEY);
+            if (targetFileIndexInResponse === -1) {
+                throw new Error(`Could not find S${season}E${episode} in the downloaded torrent pack's file list.`);
+            }
+            logger.debug(`[API] Verified target file is at index ${targetFileIndexInResponse} in the RD response.`);
+
+            // Step 2: Use that verified index to get the corresponding link from the 'links' array.
+            const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
+            if (!linkToUnrestrict) {
+                throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+            }
+            logger.debug(`[API] Found link to unrestrict: ${linkToUnrestrict}`);
+
+            const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
             if (!unrestricted) throw new Error('Failed to unrestrict link.');
 
             res.redirect(unrestricted.download);
@@ -83,10 +97,22 @@ async function startApiServer() {
             if (rows.length === 0) throw new Error('Cached torrent not found in database.');
 
             const torrentInfo = rows[0].rd_torrent_info_json;
-            const file = matcher.findFileInTorrentInfo(torrentInfo, parseInt(season, 10), parseInt(episode, 10));
-            if (!file) throw new Error(`Episode S${season}E${episode} not found in cached torrent files.`);
+            
+            // Applying the same robust logic to the cached data
+            const targetFileIndexInResponse = torrentInfo.files.findIndex(file => {
+                const fileInfo = PTT.parse(file.path);
+                return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
+            });
 
-            const unrestricted = await rd.unrestrictLink(file.link, REALDEBRID_API_KEY);
+            if (targetFileIndexInResponse === -1) {
+                throw new Error(`Episode S${season}E${episode} not found in cached torrent files.`);
+            }
+            const linkToUnrestrict = torrentInfo.links[targetFileIndexInResponse];
+            if (!linkToUnrestrict) {
+                throw new Error(`Could not find a corresponding link in cached info at verified index ${targetFileIndexInResponse}.`);
+            }
+
+            const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
             if (!unrestricted) throw new Error('Failed to unrestrict cached link.');
 
             pool.query('UPDATE torrents SET last_used_at = CURRENT_TIMESTAMP WHERE infohash = $1 AND tmdb_id = $2', [infoHash, imdbId]);
@@ -105,7 +131,6 @@ async function startApiServer() {
 
 
 // --- STREMIO ADDON SERVER ---
-// This server's ONLY job is to respond to Stremio's manifest and stream requests.
 async function startAddonServer() {
     await initDb();
     

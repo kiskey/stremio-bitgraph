@@ -35,17 +35,9 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
     const cachedStreams = [];
 
     for (const torrent of cachedTorrents) {
-        const file = findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode);
-        if (file) {
-            cachedStreams.push({
-                infoHash: torrent.infohash,
-                torrentName: torrent.rd_torrent_info_json.filename,
-                seeders: torrent.seeders,
-                language: torrent.language,
-                quality: torrent.quality,
-                size: torrent.rd_torrent_info_json.bytes, // Get size from cached JSON
-                isCached: true,
-            });
+        if (findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode)) {
+            logger.debug(`[MATCHER-SERIES] Found S${season}E${episode} in cached torrent: "${torrent.rd_torrent_info_json.filename}"`);
+            cachedStreams.push({ infoHash: torrent.infohash, torrentName: torrent.rd_torrent_info_json.filename, seeders: torrent.seeders, language: torrent.language, quality: torrent.quality, size: torrent.rd_torrent_info_json.bytes, isCached: true });
         }
     }
 
@@ -53,21 +45,29 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
     for (const torrent of newTorrents) {
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
-        if (getTitleSimilarity(tmdbShow.name, torrentData.name) < SIMILARITY_THRESHOLD) continue;
+
+        logger.debug(`[MATCHER-SERIES] Evaluating new torrent: "${torrentData.name}"`);
+        if (getTitleSimilarity(tmdbShow.name, torrentData.name) < SIMILARITY_THRESHOLD) {
+            logger.debug(`[MATCHER-SERIES] -> REJECTED: Low title similarity.`);
+            continue;
+        }
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
         const torrentInfo = PTT.parse(torrentData.name);
         if (torrentInfo.season === season && torrentInfo.episode === episode) {
+            logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
             continue;
         }
 
+        logger.debug(`[MATCHER-SERIES] -> Title similar, but S/E mismatch. Diving into files...`);
         const files = await getTorrentFiles(torrent.infoHash);
         if (!files || files.length === 0) continue;
         for (const file of files) {
             if (file.fileType !== 'video') continue;
             const fileInfo = PTT.parse(file.path);
             if (fileInfo.season === season && fileInfo.episode === episode) {
+                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
                 streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
                 break;
             }
@@ -76,18 +76,20 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
     return { streams, cachedStreams };
 }
 
+// --- CORRECTED MOVIE MATCHER WITH VERBOSE LOGGING ---
 export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrents, preferredLanguages) {
     const streams = [];
     const cachedStreams = [];
 
     for (const torrent of cachedTorrents) {
+        logger.debug(`[MATCHER-MOVIE] Found cached torrent: "${torrent.rd_torrent_info_json.filename}"`);
         cachedStreams.push({
             infoHash: torrent.infohash,
             torrentName: torrent.rd_torrent_info_json.filename,
             seeders: torrent.seeders,
             language: torrent.language,
             quality: torrent.quality,
-            size: torrent.rd_torrent_info_json.bytes, // Get size from cached JSON
+            size: torrent.rd_torrent_info_json.bytes,
             isCached: true,
         });
     }
@@ -97,14 +99,36 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
         const torrentData = torrent.torrent;
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, torrentData.name);
-        const parsedInfo = PTT.parse(torrentData.name);
-        const yearMatch = !parsedInfo.year || parsedInfo.year == new Date(tmdbMovie.release_date).getFullYear();
+        logger.debug(`[MATCHER-MOVIE] Evaluating new torrent: "${torrentData.name}"`);
 
-        if (titleSimilarity >= SIMILARITY_THRESHOLD && yearMatch) {
-            const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-            streams.push({ infoHash: torrent.infoHash, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, torrentData.name);
+        logger.debug(`[MATCHER-MOVIE] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
+        if (titleSimilarity < SIMILARITY_THRESHOLD) {
+            logger.debug(`[MATCHER-MOVIE] -> REJECTED: Low title similarity.`);
+            continue;
         }
+
+        const parsedInfo = PTT.parse(torrentData.name);
+        const tmdbYear = new Date(tmdbMovie.release_date).getFullYear();
+        const yearMatch = !parsedInfo.year || parsedInfo.year == tmdbYear;
+        logger.debug(`[MATCHER-MOVIE] -> Year match: ${yearMatch} (Torrent: ${parsedInfo.year || 'N/A'}, TMDB: ${tmdbYear})`);
+        
+        if (!yearMatch) {
+            logger.debug(`[MATCHER-MOVIE] -> REJECTED: Year mismatch.`);
+            continue;
+        }
+
+        logger.debug(`[MATCHER-MOVIE] -> ACCEPTED: Title and year match.`);
+        const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
+        streams.push({
+            infoHash: torrent.infoHash,
+            torrentName: torrentData.name,
+            seeders: torrent.seeders,
+            language: bestLanguage,
+            quality: getQuality(torrent.videoResolution),
+            size: torrentData.size,
+            isCached: false,
+        });
     }
     return { streams, cachedStreams };
 }

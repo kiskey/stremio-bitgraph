@@ -11,11 +11,10 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
 /**
- * GraphQL fragment for common TorrentContent fields.
- * CRITICAL FIX: Re-aligned precisely with fields observed in the user's
- * working 'query_log.txt' for the `torrentContent.search.items` structure.
- * This includes `magnetUri` and `files` directly on TorrentContent,
- * while also fetching essential nested `torrent` and `content` fields.
+ * Fragment for TorrentContent fields.
+ * CRITICAL FIX: This fragment has been fully reverted to precisely match the
+ * user's provided "working" version, including all nested fields and
+ * createdAt/updatedAt timestamps, to resolve the 422 error.
  */
 const TORRENT_CONTENT_FIELDS_FRAGMENT = `
   fragment TorrentContentFields on TorrentContent {
@@ -45,35 +44,77 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     publishedAt
     createdAt
     updatedAt
-    magnetUri 
-    files { 
-      path
-      size
-      index
-      extension
-      fileType
-    }
-    torrent { 
+    torrent {
+      infoHash
       name
       size
+      filesStatus
+      filesCount
+      hasFilesInfo
+      singleFile
       fileType
+      sources {
+        key
+        name
+      }
+      seeders
+      leechers
       tagNames
+      magnetUri
+      createdAt
+      updatedAt
     }
-    content { 
+    content {
+      type
       source
       id
+      metadataSource {
+        key
+        name
+      }
       title
       releaseDate
       releaseYear
       overview
       runtime
-      externalLinks {
-        url
-      }
+      voteAverage
+      voteCount
       originalLanguage {
         id
         name
       }
+      attributes {
+        metadataSource {
+          key
+          name
+        }
+        source
+        key
+        value
+        createdAt
+        updatedAt
+      }
+      collections {
+        metadataSource {
+          key
+          name
+        }
+        type
+        source
+        id
+        name
+        createdAt
+        updatedAt
+      }
+      externalLinks {
+        metadataSource {
+          key
+          name
+        }
+        url
+      }
+      createdAt
+      updatedAt
     }
   }
 `;
@@ -98,44 +139,22 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
 `;
 
 /**
- * Fragment for TorrentFile fields.
- */
-const TORRENT_FILE_FRAGMENT = `
-  fragment TorrentFileFields on TorrentFile {
-    infoHash
-    index
-    path
-    size
-    fileType
-    createdAt
-    updatedAt
-  }
-`;
-
-/**
- * Fragment for TorrentFilesQueryResult.
- */
-const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
-  ${TORRENT_FILE_FRAGMENT}
-  fragment TorrentFilesQueryResultFields on TorrentFilesQueryResult {
-    items {
-      ...TorrentFileFields
-    }
-    totalCount
-    hasNextPage
-  }
-`;
-
-/**
  * GraphQL query for getting files within a specific torrent.
- * Uses the TorrentFilesQueryResult fragment.
+ * CRITICAL FIX: This query has been fully reverted to precisely match the
+ * user's provided "working" version, using inline fields without extra fragments.
  */
 const TORRENT_FILES_QUERY = `
-  ${TORRENT_FILES_QUERY_RESULT_FRAGMENT}
   query TorrentFiles($input: TorrentFilesQueryInput!) {
     torrent {
       files(input: $input) {
-        ...TorrentFilesQueryResultFields
+        items {
+          infoHash
+          index
+          path
+          extension
+          fileType
+          size
+        }
       }
     }
   }

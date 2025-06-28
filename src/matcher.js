@@ -14,7 +14,6 @@ export function findFileInTorrentInfo(torrentInfo, season, episode) {
     for (const file of torrentInfo.files) {
         const fileInfo = PTT.parse(file.path);
         if (fileInfo.season === season && fileInfo.episode === episode) {
-            // Return the file object from the RD JSON, which includes the private link
             return file;
         }
     }
@@ -43,19 +42,20 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
     // Process new torrents from Bitmagnet search
     const cachedInfoHashes = new Set(cachedTorrents.map(t => t.infohash));
     for (const torrent of newTorrents) {
-        // Avoid reprocessing if we already have it cached
-        if (cachedInfoHashes.has(torrent.infoHash)) continue;
+        // The torrent object from the query now has a nested 'torrent' property
+        const torrentData = torrent.torrent;
+        if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
-        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrent.name);
+        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
         if (titleSimilarity < SIMILARITY_THRESHOLD) continue;
 
-        const torrentInfo = PTT.parse(torrent.name);
+        const torrentInfo = PTT.parse(torrentData.name);
 
-        if (torrent.filesStatus === 'single' && torrentInfo.season === season && torrentInfo.episode === episode) {
+        if (torrentData.filesStatus === 'single' && torrentInfo.season === season && torrentInfo.episode === episode) {
             streams.push({
                 infoHash: torrent.infoHash,
                 fileIndex: 0,
-                torrentName: torrent.name,
+                torrentName: torrentData.name,
                 seeders: torrent.seeders,
                 language: torrent.languages?.[0]?.id || 'en',
                 quality: getQuality(torrent.videoResolution),
@@ -64,7 +64,7 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
             continue;
         }
 
-        if (torrent.filesStatus === 'multi' || torrent.filesStatus === 'over_threshold') {
+        if (torrentData.filesStatus === 'multi' || torrentData.filesStatus === 'over_threshold') {
             const files = await getTorrentFiles(torrent.infoHash);
             const bestFile = files.find(f => {
                 const fi = PTT.parse(f.path);
@@ -75,7 +75,7 @@ export async function findBestStreams(tmdbShow, season, episode, newTorrents, ca
                 streams.push({
                     infoHash: torrent.infoHash,
                     fileIndex: bestFile.index,
-                    torrentName: torrent.name,
+                    torrentName: torrentData.name,
                     seeders: torrent.seeders,
                     language: torrent.languages?.[0]?.id || 'en',
                     quality: getQuality(torrent.videoResolution),

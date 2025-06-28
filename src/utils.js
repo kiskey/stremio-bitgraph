@@ -25,23 +25,29 @@ export function formatSize(bytes) {
     return `${gb.toFixed(2)} GB`;
 }
 
-// --- FINAL, DEFINITIVE SANITIZATION FUNCTION ---
-// Implements the user's precise architectural requirements.
+// --- FINAL, ROBUST, AND CORRECT SANITIZATION FUNCTION ---
 export function sanitizeName(name) {
     let sanitized = name;
 
-    // 1. Remove any domain name formats like www.website.com or http://...
-    // The \b ensures we match whole words/domains.
-    sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+)\b/gi, ' ');
+    // 1. Remove anything inside the special CJK brackets 【】
+    sanitized = sanitized.replace(/【.*?】/g, ' ');
 
-    // 2. Remove any "word" (a sequence of non-space characters) that contains CJK characters or special brackets.
-    // This is the key to removing "【高清...】" and "金妮与乔治娅" as whole units.
-    sanitized = sanitized.replace(/\S*[\u3000-\u9FFF【】]\S*/g, ' ');
+    // 2. Remove any "words" that are composed entirely of CJK characters.
+    // This correctly removes "金妮与乔治娅" and "第三季" but leaves "Ginny" alone.
+    // It requires the /u flag for Unicode property escapes to work.
+    sanitized = sanitized.replace(/\b\p{Script=Han}+\b/gu, ' ');
 
-    // 3. Replace common separators with spaces. Standard brackets []() are NOT replaced.
+    // 3. Remove any bracketed text that looks like metadata (e.g., [简繁英字幕], [全10集])
+    // by targeting brackets that contain CJK characters.
+    sanitized = sanitized.replace(/\[\s*[^a-zA-Z]*\p{Script=Han}[^a-zA-Z]*\s*\]/gu, ' ');
+
+    // 4. Remove any remaining domain names or email addresses.
+    sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
+
+    // 5. Replace common separators with spaces. We leave '-' alone as it can be part of release groups.
     sanitized = sanitized.replace(/[._]/g, ' ');
 
-    // 4. Final cleanup: collapse multiple spaces and trim.
+    // 6. Final cleanup: collapse multiple spaces and trim.
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
     return sanitized;

@@ -6,80 +6,80 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-import { logger, getQuality } from './src/utils.js';
+import { logger, getQuality, sleep } from './src/utils.js';
 import { getShowDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
 import PTT from 'parse-torrent-title';
 
-const processingTorrents = new Set();
+// --- ROBUST, REQUEST-AWARE LOCKING MECHANISM ---
+// Instead of a simple Set, we use a Map to store the Promise of the ongoing request.
+const processingRequests = new Map();
 
 async function startApiServer() {
     const app = express();
     app.use(cors());
 
     app.get(`/${ADDON_ID}/process-new/:imdbId_season_episode/:infoHash/:fileIndex`, async (req, res) => {
-        const { imdbId_season_episode, infoHash, fileIndex } = req.params;
+        const { imdbId_season_episode, infoHash } = req.params;
         const [imdbId, season, episode] = imdbId_season_episode.split(':');
         
-        if (processingTorrents.has(infoHash)) {
-            logger.warn(`[API] Request for ${infoHash} is already being processed. Rejecting duplicate request.`);
-            return res.status(409).send('Processing already in progress for this torrent. Please wait.');
+        // --- IDEMPOTENCY & REQUEST-AWARE CACHING LOGIC ---
+        if (processingRequests.has(infoHash)) {
+            logger.warn(`[API] Request for ${infoHash} is already being processed. Awaiting result...`);
+            try {
+                // Wait for the original request to finish and get its result.
+                const readyTorrent = await processingRequests.get(infoHash);
+                // Now that we have the result, proceed as if we just finished polling ourselves.
+                return playFromReadyTorrent(res, readyTorrent, season, episode);
+            } catch (error) {
+                logger.error(`[API] The original processing request for ${infoHash} failed: ${error.message}`);
+                return res.status(500).send(`Original processing request failed: ${error.message}`);
+            }
         }
 
+        // If no request is in progress, start a new one.
+        const processPromise = new Promise(async (resolve, reject) => {
+            try {
+                logger.info(`[API] Acquired lock for ${infoHash}. Processing NEW request.`);
+                const magnet = `magnet:?xt=urn:btih:${infoHash}`;
+                const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
+                if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
+
+                await rd.selectFiles(addResult.id, 'all', REALDEBRID_API_KEY);
+                const readyTorrent = await rd.pollTorrentUntilReady(addResult.id, REALDEBRID_API_KEY);
+
+                const torrentName = readyTorrent.filename;
+                const quality = getQuality(torrentName);
+                const language = PTT.parse(torrentName).languages?.[0] || 'en';
+                
+                await pool.query(
+                    `INSERT INTO torrents (infohash, tmdb_id, rd_torrent_info_json, language, quality, seeders)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     ON CONFLICT (infohash, tmdb_id)
+                     DO UPDATE SET rd_torrent_info_json = EXCLUDED.rd_torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
+                    [infoHash, imdbId, readyTorrent, language, quality, readyTorrent.seeders]
+                );
+                
+                resolve(readyTorrent); // Resolve the promise with the completed torrent info.
+            } catch (error) {
+                reject(error); // Reject the promise if anything goes wrong.
+            }
+        });
+
+        // Store the promise in our map.
+        processingRequests.set(infoHash, processPromise);
+
         try {
-            processingTorrents.add(infoHash);
-            logger.info(`[API] Acquired lock for ${infoHash}. Processing NEW request for file ${fileIndex}`);
-
-            const magnet = `magnet:?xt=urn:btih:${infoHash}`;
-            const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
-            if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
-
-            logger.debug(`[API] Selecting ALL files for torrent ID: ${addResult.id}`);
-            await rd.selectFiles(addResult.id, 'all', REALDEBRID_API_KEY);
-            
-            const readyTorrent = await rd.pollTorrentUntilReady(addResult.id, REALDEBRID_API_KEY);
-
-            const torrentName = readyTorrent.filename;
-            const quality = getQuality(torrentName);
-            
-            // --- CORRECTED LANGUAGE LOGIC ---
-            // Use PTT to parse the final torrent name. It's fast and doesn't require another API call.
-            // Default to 'en' if PTT can't find a language.
-            const language = PTT.parse(torrentName).languages?.[0] || 'en';
-            logger.debug(`[API] Determined language for DB save as "${language}" from torrent name.`);
-            
-            await pool.query(
-                `INSERT INTO torrents (infohash, tmdb_id, rd_torrent_info_json, language, quality, seeders)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (infohash, tmdb_id)
-                 DO UPDATE SET rd_torrent_info_json = EXCLUDED.rd_torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
-                [infoHash, imdbId, readyTorrent, language, quality, readyTorrent.seeders]
-            );
-
-            const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
-                const fileInfo = PTT.parse(file.path);
-                return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
-            });
-
-            if (targetFileIndexInResponse === -1) {
-                throw new Error(`Could not find S${season}E${episode} in the downloaded torrent pack's file list.`);
-            }
-            const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
-            if (!linkToUnrestrict) {
-                throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
-            }
-
-            const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
-            if (!unrestricted) throw new Error('Failed to unrestrict link.');
-
-            res.redirect(unrestricted.download);
+            const readyTorrent = await processPromise;
+            await playFromReadyTorrent(res, readyTorrent, season, episode);
         } catch (error) {
             logger.error(`[API] Error processing new torrent ${infoHash}: ${error.message}`);
             res.status(500).send(`Error: ${error.message}`);
         } finally {
-            processingTorrents.delete(infoHash);
+            // Clean up the map once the request is fully complete.
+            processingRequests.delete(infoHash);
             logger.info(`[API] Released lock for ${infoHash}.`);
         }
     });
@@ -92,28 +92,8 @@ async function startApiServer() {
         try {
             const { rows } = await pool.query('SELECT rd_torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2', [infoHash, imdbId]);
             if (rows.length === 0) throw new Error('Cached torrent not found in database.');
-
             const torrentInfo = rows[0].rd_torrent_info_json;
-            
-            const targetFileIndexInResponse = torrentInfo.files.findIndex(file => {
-                const fileInfo = PTT.parse(file.path);
-                return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
-            });
-
-            if (targetFileIndexInResponse === -1) {
-                throw new Error(`Episode S${season}E${episode} not found in cached torrent files.`);
-            }
-            const linkToUnrestrict = torrentInfo.links[targetFileIndexInResponse];
-            if (!linkToUnrestrict) {
-                throw new Error(`Could not find a corresponding link in cached info at verified index ${targetFileIndexInResponse}.`);
-            }
-
-            const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
-            if (!unrestricted) throw new Error('Failed to unrestrict cached link.');
-
-            pool.query('UPDATE torrents SET last_used_at = CURRENT_TIMESTAMP WHERE infohash = $1 AND tmdb_id = $2', [infoHash, imdbId]);
-
-            res.redirect(unrestricted.download);
+            await playFromReadyTorrent(res, torrentInfo, season, episode);
         } catch (error) {
             logger.error(`[API] Error playing from cached torrent: ${error.message}`);
             res.status(500).send(`Error: ${error.message}`);
@@ -123,6 +103,27 @@ async function startApiServer() {
     app.listen(API_PORT, () => {
         logger.info(`[API] Express API server for callbacks listening on http://127.0.0.1:${API_PORT}`);
     });
+}
+
+// --- HELPER FUNCTION TO AVOID CODE DUPLICATION ---
+async function playFromReadyTorrent(res, readyTorrent, season, episode) {
+    const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
+        const fileInfo = PTT.parse(file.path);
+        return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
+    });
+
+    if (targetFileIndexInResponse === -1) {
+        throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list.`);
+    }
+    const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
+    if (!linkToUnrestrict) {
+        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+    }
+
+    const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
+    if (!unrestricted) throw new Error('Failed to unrestrict link.');
+
+    res.redirect(unrestricted.download);
 }
 
 
@@ -153,7 +154,7 @@ async function startAddonServer() {
         const showDetails = await getShowDetails(imdbId);
         if (!showDetails || !showDetails.name) {
             logger.warn(`[ADDON] Could not find valid TMDB details for ${imdbId}. Aborting search for new torrents.`);
-            const { cachedStreams } = await matcher.findBestStreams(null, seasonNum, episodeNum, [], cachedTorrents, PREFERRED_LANGUAGES);
+            const { cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, [], cachedTorrents, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams([], cachedStreams, PREFERRED_LANGUAGES);
             const streamObjects = sortedStreams.map(stream => ({
                 name: `[RD] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
@@ -164,7 +165,6 @@ async function startAddonServer() {
         }
 
         const searchString = `${showDetails.name} S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
-        logger.debug(`[ADDON] Constructed Bitmagnet search string: "${searchString}"`);
         const newTorrents = await searchTorrents(searchString);
         logger.debug(`[ADDON] Found ${newTorrents.length} new torrents from Bitmagnet.`);
 

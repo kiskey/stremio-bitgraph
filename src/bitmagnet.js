@@ -10,13 +10,9 @@ const { retryWithExponentialBackoff, logger } = require('./utils');
 
 const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
-// No longer need BITMAGNET_LANGUAGE_MAP as language filtering is client-side.
-
 /**
  * GraphQL fragment for common TorrentContent fields.
- * CRITICAL FIX: Aligned precisely with the provided Bitmagnet schema.
- * - 'magnetUri' is now correctly nested under 'torrent'.
- * - 'files' field is removed from this fragment, as it's fetched via getTorrentFiles.
+ * All GraphQL comments removed as per user's request.
  */
 const TORRENT_CONTENT_FIELDS_FRAGMENT = `
   fragment TorrentContentFields on TorrentContent {
@@ -46,7 +42,7 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     publishedAt
     createdAt
     updatedAt
-    torrent { # Nested Torrent object
+    torrent {
       infoHash
       name
       size
@@ -54,76 +50,19 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
       filesCount
       hasFilesInfo
       singleFile
-      fileType
-      sources {
-        key
-        name
-      }
-      seeders
-      leechers
-      tagNames
-      magnetUri # CRITICAL FIX: Correct location for magnetUri as per schema
-      createdAt
-      updatedAt
+      magnetUri
     }
-    content { # Nested Content object
-      type
+    content {
       source
       id
-      metadataSource {
-        key
-        name
-      }
       title
-      releaseDate
-      releaseYear
-      overview
-      runtime
-      voteAverage
-      voteCount
-      originalLanguage {
-        id
-        name
-      }
-      attributes {
-        metadataSource {
-          key
-          name
-        }
-        source
-        key
-        value
-        createdAt
-        updatedAt
-      }
-      collections {
-        metadataSource {
-          key
-          name
-        }
-        type
-        source
-        id
-        name
-        createdAt
-        updatedAt
-      }
-      externalLinks {
-        metadataSource {
-          key
-          name
-        }
-        url
-      }
-      createdAt
-      updatedAt
     }
   }
 `;
 
 /**
  * GraphQL query for searching torrent content.
- * Uses the fragment and includes totalCount and hasNextPage.
+ * All GraphQL comments removed as per user's request.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
   ${TORRENT_CONTENT_FIELDS_FRAGMENT}
@@ -131,10 +70,10 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
     torrentContent {
       search(input: $input) {
         items {
-          ...TorrentContentFields # Use the fragment here
+          ...TorrentContentFields
         }
-        totalCount # Added as per user's working model
-        hasNextPage # Added as per user's working model
+        totalCount
+        hasNextPage
       }
     }
   }
@@ -142,6 +81,7 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
 
 /**
  * Fragment for TorrentFile fields.
+ * All GraphQL comments removed as per user's request.
  */
 const TORRENT_FILE_FRAGMENT = `
   fragment TorrentFileFields on TorrentFile {
@@ -157,6 +97,7 @@ const TORRENT_FILE_FRAGMENT = `
 
 /**
  * Fragment for TorrentFilesQueryResult.
+ * All GraphQL comments removed as per user's request.
  */
 const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
   ${TORRENT_FILE_FRAGMENT}
@@ -171,7 +112,7 @@ const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
 
 /**
  * GraphQL query for getting files within a specific torrent.
- * Uses the TorrentFilesQueryResult fragment.
+ * All GraphQL comments removed as per user's request.
  */
 const TORRENT_FILES_QUERY = `
   ${TORRENT_FILES_QUERY_RESULT_FRAGMENT}
@@ -204,15 +145,15 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
     query: TORRENT_CONTENT_SEARCH_QUERY,
     variables: {
       input: {
-        queryString: searchQuery, // Only pass the show title here
-        limit: 50, // Limit to 50 results as requested
+        queryString: searchQuery,
+        limit: 50,
         orderBy: [
-          { field: 'seeders', descending: true }, // Order by highest seeders first
-          { field: 'published_at', descending: true } // Then by most recent published date
+          { field: 'seeders', descending: true },
+          { field: 'published_at', descending: true }
         ],
         facets: {
           contentType: {
-            filter: ['tv_show'] // 'tv_show' (lowercase) to match enum
+            filter: ['tv_show']
           }
         }
       },
@@ -227,18 +168,15 @@ async function searchTorrents(searchQuery, minSeeders = 1) {
       config.bitmagnet.retry
     );
 
-    // CRITICAL FIX: Add explicit null/undefined check for response and response.data
     if (!response || !response.data) {
         logger.error(`Bitmagnet API call for search query "${searchQuery}" returned an invalid or empty response object.`);
         return [];
     }
 
-    // Bitmagnet's schema defines `torrentContent.search.items` for results
     const torrents = response.data.data?.torrentContent?.search?.items || [];
     logger.debug(`Bitmagnet search found ${torrents.length} torrents.`);
     logger.debug(`Bitmagnet raw response data (truncated for brevity): ${JSON.stringify(response.data).substring(0, 500)}...`);
 
-    // Client-side filtering for minSeeders (still good practice)
     return torrents.filter(torrent => torrent.seeders >= minSeeders);
 
   } catch (error) {
@@ -289,7 +227,6 @@ async function getTorrentFiles(infoHash) {
       config.bitmagnet.retry
     );
 
-    // CRITICAL FIX: Add explicit null/undefined check for response and response.data
     if (!response || !response.data) {
         logger.error(`Bitmagnet API call for files of infoHash "${infoHash}" returned an invalid or empty response object.`);
         return [];

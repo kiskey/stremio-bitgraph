@@ -31,16 +31,26 @@ export function sanitizeName(name) {
     // 1. Remove anything inside the special CJK brackets 【】
     sanitized = sanitized.replace(/【.*?】/g, ' ');
 
-    // 2. Remove any continuous block of non-Latin characters (CJK, Arabic, Cyrillic, Thai, etc.)
-    sanitized = sanitized.replace(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+/gu, ' ');
+    // 2. Remove any sequences of non-Latin characters
+    sanitized = sanitized.replace(
+        /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+/gu,
+        ' '
+    );
 
-    // 3. Remove bracketed text that contains non-Latin scripts
-    sanitized = sanitized.replace(/\[\s*[^a-zA-Z]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+[^a-zA-Z]*\s*\]/gu, ' ');
+    // 3. Remove bracketed metadata that includes any non-Latin characters (even with digits)
+    sanitized = sanitized.replace(
+        /\[[^\[\]]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+[^\[\]]*\]/gu,
+        ' '
+    );
 
-    // 4. Remove URLs, domains, emails
+    // 4. Remove URLs, domain names, or emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
 
-    // 5. Replace separators like '.' and '_' with spaces (keep '-' as it can be part of release names)
+    // 4b. Clean up leftover standalone punctuation (hyphens, dashes) after domain removal
+    sanitized = sanitized.replace(/^\s*[-–—]+\s*|\s*[-–—]+\s*$/g, ' ');
+    sanitized = sanitized.replace(/\s+[-–—]+\s+/g, ' ');
+
+    // 5. Replace separators like . and _ with space (keep hyphen, it’s often meaningful)
     sanitized = sanitized.replace(/[._]/g, ' ');
 
     // 6. Collapse multiple spaces and trim
@@ -48,6 +58,7 @@ export function sanitizeName(name) {
 
     return sanitized;
 }
+
 
 
 

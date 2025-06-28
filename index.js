@@ -13,10 +13,9 @@ import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
 import PTT from 'parse-torrent-title';
 
-// In-memory set to act as a lock for currently processing torrents
+// ... (API server code remains identical) ...
 const processingTorrents = new Set();
 
-// --- API SERVER (Express) ---
 async function startApiServer() {
     const app = express();
     app.use(cors());
@@ -45,7 +44,13 @@ async function startApiServer() {
 
             const torrentName = readyTorrent.filename;
             const quality = getQuality(torrentName);
-            const language = PTT.parse(torrentName).languages?.[0] || 'en';
+            
+            // We need to determine the language to save it correctly in the DB
+            const showDetails = await getShowDetails(imdbId);
+            const bitmagnetTorrent = await searchTorrents(`"${torrentName}"`);
+            const language = bitmagnetTorrent.length > 0
+                ? matcher.getBestLanguage(bitmagnetTorrent[0].languages, PREFERRED_LANGUAGES)
+                : 'en';
             
             await pool.query(
                 `INSERT INTO torrents (infohash, tmdb_id, rd_torrent_info_json, language, quality, seeders)
@@ -55,8 +60,6 @@ async function startApiServer() {
                 [infoHash, imdbId, readyTorrent, language, quality, readyTorrent.seeders]
             );
 
-            // --- THE DEFINITIVE LOGIC FOR FILE/LINK MAPPING ---
-            // Step 1: Find the index of the file we want by parsing the 'path' of each file in the 'files' array.
             const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
                 const fileInfo = PTT.parse(file.path);
                 return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
@@ -65,14 +68,10 @@ async function startApiServer() {
             if (targetFileIndexInResponse === -1) {
                 throw new Error(`Could not find S${season}E${episode} in the downloaded torrent pack's file list.`);
             }
-            logger.debug(`[API] Verified target file is at index ${targetFileIndexInResponse} in the RD response.`);
-
-            // Step 2: Use that verified index to get the corresponding link from the 'links' array.
             const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
             if (!linkToUnrestrict) {
                 throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
             }
-            logger.debug(`[API] Found link to unrestrict: ${linkToUnrestrict}`);
 
             const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
             if (!unrestricted) throw new Error('Failed to unrestrict link.');
@@ -98,7 +97,6 @@ async function startApiServer() {
 
             const torrentInfo = rows[0].rd_torrent_info_json;
             
-            // Applying the same robust logic to the cached data
             const targetFileIndexInResponse = torrentInfo.files.findIndex(file => {
                 const fileInfo = PTT.parse(file.path);
                 return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
@@ -130,7 +128,6 @@ async function startApiServer() {
 }
 
 
-// --- STREMIO ADDON SERVER ---
 async function startAddonServer() {
     await initDb();
     
@@ -158,7 +155,7 @@ async function startAddonServer() {
         const showDetails = await getShowDetails(imdbId);
         if (!showDetails || !showDetails.name) {
             logger.warn(`[ADDON] Could not find valid TMDB details for ${imdbId}. Aborting search for new torrents.`);
-            const { cachedStreams } = await matcher.findBestStreams(null, seasonNum, episodeNum, [], cachedTorrents);
+            const { cachedStreams } = await matcher.findBestStreams(null, seasonNum, episodeNum, [], cachedTorrents, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams([], cachedStreams, PREFERRED_LANGUAGES);
             const streamObjects = sortedStreams.map(stream => ({
                 name: `[RD] ${stream.language.toUpperCase()} | ${stream.quality.toUpperCase()}`,
@@ -173,7 +170,8 @@ async function startAddonServer() {
         const newTorrents = await searchTorrents(searchString);
         logger.debug(`[ADDON] Found ${newTorrents.length} new torrents from Bitmagnet.`);
 
-        const { streams, cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, newTorrents, cachedTorrents);
+        // --- CHANGE IS HERE ---
+        const { streams, cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, newTorrents, cachedTorrents, PREFERRED_LANGUAGES);
         const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for ${args.id}`);
 
@@ -197,6 +195,5 @@ async function startAddonServer() {
     logger.info(`[ADDON] To install, use: ${APP_HOST}/manifest.json`);
 }
 
-// --- START BOTH SERVERS ---
 startApiServer();
 startAddonServer();

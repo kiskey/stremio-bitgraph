@@ -6,7 +6,8 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-import { logger, getQuality } from './src/utils.js';
+// --- THIS IS THE FIX: Added 'formatSize' to the import list ---
+import { logger, getQuality, formatSize } from './src/utils.js';
 import { getShowDetails, getMovieDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
@@ -28,7 +29,6 @@ async function startApiServer() {
             let torrentInfo;
             const lockEntry = processingLock.get(infoHash);
 
-            // State 1: Check the lock for ANY existing state
             if (lockEntry) {
                 switch (lockEntry.state) {
                     case 'COMPLETED':
@@ -38,7 +38,6 @@ async function startApiServer() {
                     case 'PROCESSING':
                         logger.warn(`[API] Request for ${infoHash} is already processing. Awaiting result...`);
                         await lockEntry.promise;
-                        // Re-check state after waiting
                         const finalLockEntry = processingLock.get(infoHash);
                         if (finalLockEntry && finalLockEntry.state === 'COMPLETED') {
                             torrentInfo = finalLockEntry.data;
@@ -51,7 +50,6 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else {
-                // State 2: Check the persistent DB cache
                 const { rows } = await pool.query("SELECT rd_torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3", [infoHash, imdbId, type]);
                 if (rows.length > 0) {
                     logger.info(`[API] DB cache hit for ${infoHash}.`);
@@ -59,7 +57,6 @@ async function startApiServer() {
                 }
             }
 
-            // State 3: If no cache hit, process as new
             if (!torrentInfo) {
                 const processPromise = new Promise(async (resolve, reject) => {
                     try {
@@ -91,19 +88,15 @@ async function startApiServer() {
                 try {
                     torrentInfo = await processPromise;
                     processingLock.set(infoHash, { state: 'COMPLETED', data: torrentInfo });
-                    // Set a timeout to clear the SUCCESS lock from memory after a short period
-                    setTimeout(() => processingLock.delete(infoHash), 30000); // 30 seconds for success
+                    setTimeout(() => processingLock.delete(infoHash), 30000);
                 } catch (error) {
                     logger.error(`[API] Caching failure for ${infoHash}: ${error.message}`);
-                    // --- FAILURE CACHING LOGIC ---
                     processingLock.set(infoHash, { state: 'FAILED', error: error });
-                    // Set a longer timeout to clear the FAILED lock, giving time for user to choose another stream
-                    setTimeout(() => processingLock.delete(infoHash), 300000); // 5 minutes for failure
-                    throw error; // Re-throw the error to be caught by the final catch block
+                    setTimeout(() => processingLock.delete(infoHash), 300000);
+                    throw error;
                 }
             }
 
-            // --- UNIFIED PLAYBACK LOGIC ---
             if (type === 'series') {
                 await playFromReadyTorrent(res, torrentInfo, season, episode);
             } else {
@@ -112,6 +105,7 @@ async function startApiServer() {
 
         } catch (error) {
             logger.error(`[API] Final error processing ${infoHash}: ${error.message}`);
+            processingLock.delete(infoHash);
             res.status(500).send(`Error: ${error.message}. Please try another stream.`);
         }
     });
@@ -152,7 +146,7 @@ async function startAddonServer() {
         const mapToStreamObjects = (streams) => {
             return streams.map(s => {
                 const prefix = s.isCached ? '⚡' : '⌛';
-                const sizeInfo = formatSize(s.size);
+                const sizeInfo = formatSize(s.size); // This line was causing the crash
                 const title = `${s.torrentName}\n💾 ${sizeInfo} | 👤 ${s.seeders} seeders`;
                 const url = `${APP_HOST}/${ADDON_ID}/stream/${type}/${id}/${s.infoHash}`;
                 

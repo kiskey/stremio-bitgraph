@@ -231,7 +231,7 @@ app.get('/stream/:type/:id', async (req, res) => {
   let bitmagnetResults = [];
   try {
     // Pass Bitmagnet endpoint from config
-    // Removed preferredLanguages param as it's not used in searchTorrents anymore
+    // Removed preferredLanguages param from searchTorrents call as it's not needed there.
     bitmagnetResults = await bitmagnet.searchTorrents(bitmagnetSearchQuery, minSeeders);
     logger.info(`Bitmagnet returned ${bitmagnetResults.length} potential torrents for "${bitmagnetSearchQuery}".`);
   } catch (bitmagnetError) {
@@ -349,7 +349,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
               try {
                   // pg driver might return JSONB as object directly, or string if column is text.
                   if (typeof cachedTorrentEntry.real_debrid_info_json === 'string') {
-                    torrentInfoFromRD = JSON.parse(cachedTorrent.real_debrid_info_json); // CRITICAL FIX: Use cachedTorrentEntry here
+                    torrentInfoFromRD = JSON.parse(cachedTorrentEntry.real_debrid_info_json); // CRITICAL FIX: Use cachedTorrentEntry.real_debrid_info_json here
                   } else {
                     torrentInfoFromRD = cachedTorrentEntry.real_debrid_info_json;
                   }
@@ -385,7 +385,7 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
           if (!rdAddedTorrentId) {
               const tmdbShowDetailsForMagnet = await tmdb.getTvShowDetails(tmdbId);
               // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
-              // CRITICAL FIX: Pass only show title to searchTorrents
+              // CRITICAL FIX: Pass only show title to searchTorrents here
               const bitmagnetResultsForMagnet = await bitmagnet.searchTorrents(`${tmdbShowDetailsForMagnet ? tmdbShowDetailsForMagnet.name : ''}`, config.minSeeders);
               const matchingTorrent = bitmagnetResultsForMagnet.find(t => t.infoHash === infoHash);
 
@@ -489,7 +489,8 @@ app.get('/realdebrid_proxy/:id', async (req, res) => {
               if (!parsedInfoForDb || !torrentNameForDb) {
                  // Re-fetch torrent details from Bitmagnet if not available.
                  // Use config.bitmagnet.graphqlEndpoint for Bitmagnet searches
-                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`${infoHash}`, config.minSeeders); // CRITICAL FIX: Pass only infoHash as query
+                 // CRITICAL FIX: Pass only infoHash as query string here for Bitmagnet lookup
+                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`${infoHash}`, config.minSeeders); 
                  const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => t.infoHash === infoHash);
 
                  if (preciseTorrentDetails) {

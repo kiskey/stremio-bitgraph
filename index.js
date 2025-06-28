@@ -59,7 +59,7 @@ function formatStreamMetadata(parsedInfo, torrentItem, preferredLanguages) {
     let episodeInfo = '';
     if (parsedInfo.season && parsedInfo.episode) {
         if (Array.isArray(parsedInfo.episode)) {
-            episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${parsedInfo.episode.map(e => String(e).padStart(2, '0')).join('-')}`;
+            episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${parsedInfo.episode.map(e => String(e).padStart(2, '0')).join('-')})}`;
         } else if (parsedInfo.range) {
              episodeInfo = `S${String(parsedInfo.season).padStart(2, '0')}E${String(parsedInfo.range.start).padStart(2, '0')}-E${String(parsedInfo.range.end).padStart(2, '0')}`;
         }
@@ -265,6 +265,11 @@ builder.defineStreamHandler(async ({ type, id, config: addonConfig }) => {
 // This acts as a proxy that Stremio will hit when a user selects a deferred stream.
 // Changed resource name from 'stream' to 'realdebrid_proxy' to avoid conflict
 builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) => {
+  // CRITICAL DIAGNOSTIC LOG: This should appear immediately if the request hits the handler.
+  logger.info(`--- REALDEBRID PROXY HIT ---`);
+  logger.debug(`Request details: Path: ${request.path}, ID: ${request.id}, Query: ${JSON.stringify(request.query)}`);
+
+
   // Parse the custom URL path. request.id contains the encodedCustomId.
   const customResourceId = decodeURIComponent(request.id);
   const [infoHash, fileIndexStr, tmdbId, seasonNumberStr, episodeNumberStr] = customResourceId.split('_');
@@ -385,6 +390,7 @@ builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) 
                 );
                 logger.info(`Torrent ID ${rdAddedTorrentId} for ${infoHash} persisted/updated in DB.`);
               } catch (dbInsertError) {
+                  // E.g., duplicate key error if another concurrent request just added it
                   logger.warn(`Failed to immediately persist torrent ID for ${infoHash} (likely a concurrent request). Re-fetching from DB.`);
                   // If insert failed due to conflict, another process wrote it. Re-fetch.
                   const resConflict = await dbQuery(
@@ -447,13 +453,19 @@ builder.defineResourceHandler('realdebrid_proxy', async ({ request, response }) 
           try {
               // Ensure we have current parsedInfoForDb and torrentNameForDb from initial retrieval or after addMagnet
               if (!parsedInfoForDb || !torrentNameForDb) {
-                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`, 1); // Search by infohash
-                 if (currentTorrentFromBitmagnet && currentTorrentFromBitmagnet.length > 0) {
-                     torrentNameForDb = currentTorrentFromBitmagnet[0].torrent ? currentTorrentFromBitmagnet[0].torrent.name : currentTorrentFromBitmagnet[0].title;
+                 // Re-fetch torrent details from Bitmagnet if not available.
+                 // This search by infoHash is approximate, assumes Bitmagnet can return details for a specific infoHash.
+                 // A more direct Bitmagnet API call for `torrent_by_infohash` would be ideal if available.
+                 const currentTorrentFromBitmagnet = await bitmagnet.searchTorrents(`"${infoHash}"`);
+                 const preciseTorrentDetails = currentTorrentFromBitmagnet.find(t => (t.torrent ? t.torrent.infoHash : t.infoHash) === infoHash);
+
+                 if (preciseTorrentDetails) {
+                     torrentNameForDb = preciseTorrentDetails.torrent ? preciseTorrentDetails.torrent.name : preciseTorrentDetails.title;
                      parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb);
                  } else {
-                     torrentNameForDb = 'Unknown Torrent Name';
-                     parsedInfoForDb = {};
+                     logger.warn(`Could not find precise Bitmagnet details for infoHash ${infoHash} for DB persistence. Using fallback names.`);
+                     torrentNameForDb = torrentInfoAfterAdd.original_filename || torrentInfoAfterAdd.filename || 'Unknown Torrent Name (Fallback)';
+                     parsedInfoForDb = matcher.parseTorrentInfo(torrentNameForDb) || {};
                  }
               }
 

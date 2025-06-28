@@ -21,6 +21,15 @@ export const logger = winston.createLogger({
 // Sleep utility for exponential backoff
 export const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- NEW: Helper function to format file size ---
+export function formatSize(bytes) {
+    if (!bytes || bytes === 0) {
+        return 'N/A';
+    }
+    const gb = bytes / 1e9; // 1 billion bytes = 1 GB
+    return `${gb.toFixed(2)} GB`;
+}
+
 // Quality sorting map
 export const QUALITY_ORDER = {
     '4k': 1,

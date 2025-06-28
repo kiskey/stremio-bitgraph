@@ -2,8 +2,6 @@ import axios from 'axios';
 import { BITMAGNET_GRAPHQL_ENDPOINT } from '../config.js';
 import { logger } from './utils.js';
 
-// --- CORRECTED GRAPHQL QUERY ---
-// This now matches the nested structure of the provided schema.
 const torrentContentSearchQuery = `
 query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
   torrentContent {
@@ -13,6 +11,7 @@ query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
         title
         seeders
         leechers
+        publishedAt
         videoResolution
         languages { id }
         torrent {
@@ -49,7 +48,6 @@ async function queryGraphQL(query, variables) {
         if (response.data.errors) {
             throw new Error(response.data.errors.map(e => e.message).join(', '));
         }
-        // Add a check for empty or null data
         if (!response.data || !response.data.data) {
             logger.warn('[BITMAGNET] Received empty data object from GraphQL server.');
             return null;
@@ -67,7 +65,11 @@ export async function searchTorrents(searchString) {
         input: {
             queryString: searchString,
             limit: 100,
-            orderBy: [{ field: 'seeders', descending: true }],
+            // CORRECTED: Sort by newest first, then by seeders as a tie-breaker.
+            orderBy: [
+                { field: 'published_at', descending: true },
+                { field: 'seeders', descending: true }
+            ],
             facets: { contentType: { filter: ["tv_show"] } }
         }
     });

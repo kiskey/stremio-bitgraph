@@ -38,10 +38,11 @@ export function sanitizeName(name) {
     );
 
     // 3. Remove bracketed metadata that includes any non-Latin characters (even with digits)
-    sanitized = sanitized.replace(
-        /\[[^\[\]]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+[^\[\]]*\]/gu,
-        ' '
-    );
+  sanitized = sanitized.replace(
+    /\[[^\[\]]*[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}][^\[\]]*\]/gu,
+    ' '
+);
+
 
     // 4. Remove URLs, domain names, or emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');

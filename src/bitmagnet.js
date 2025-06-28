@@ -53,6 +53,10 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
       size
       fileType
       tagNames
+      # infoHash is directly on TorrentContent, no need to duplicate here
+      # magnetUri is directly on TorrentContent, no need to duplicate here
+      seeders # Seeders from torrent level if available
+      leechers # Leechers from torrent level if available
     }
     content { 
       source
@@ -122,11 +126,12 @@ const TORRENT_FILES_QUERY = `
  */
 async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferredLanguages from signature
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
-    logger.error('Bitmagnet GraphQL endpoint is not configured.');
+    logger.error('Bitmagnet GraphQL endpoint is not configured. Please set BITMAGNET_GRAPHQL_ENDPOINT in your environment variables.');
     return [];
   }
 
   logger.info(`Searching Bitmagnet for: "${searchQuery}" with min seeders: ${minSeeders}`);
+  logger.debug(`Bitmagnet GraphQL endpoint being used for search: ${BITMAGNET_GRAPHQL_ENDPOINT}`);
 
   const payload = {
     query: TORRENT_CONTENT_SEARCH_QUERY,
@@ -150,7 +155,7 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload), // Use the prepared payload
-      config.bitmagnet.retry
+      config.retry // Using general retry config
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -178,9 +183,9 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
         logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2)); // Log GraphQL specific errors
       }
     } else if (error.request) {
-      logger.error('Bitmagnet Request was made but no response was received:', error.request);
+      logger.error('Bitmagnet Request was made but no response was received (network issue, CORS, etc.):', error.request);
     } else {
-      logger.error('Error setting up Bitmagnet request:', error.message);
+      logger.error('Error setting up Bitmagnet request (e.g., malformed URL):', error.message);
     }
     return [];
   }
@@ -194,11 +199,13 @@ async function searchTorrents(searchQuery, minSeeders = 1) { // Removed preferre
  */
 async function getTorrentFiles(infoHash) {
   if (!BITMAGNET_GRAPHQL_ENDPOINT || BITMAGNET_GRAPHQL_ENDPOINT === 'YOUR_BITMAGNET_GRAPHQL_ENDPOINT') {
-    logger.error('Bitmagnet GraphQL endpoint is not configured.');
+    logger.error('Bitmagnet GraphQL endpoint is not configured. Please set BITMAGNET_GRAPHQL_ENDPOINT in your environment variables.');
     return [];
   }
 
   logger.debug(`Fetching files for infohash: ${infoHash}`);
+  logger.debug(`Bitmagnet GraphQL endpoint being used for files: ${BITMAGNET_GRAPHQL_ENDPOINT}`);
+
   const payload = {
     query: TORRENT_FILES_QUERY,
     variables: {
@@ -212,7 +219,7 @@ async function getTorrentFiles(infoHash) {
   try {
     const response = await retryWithExponentialBackoff(
       async () => axios.post(BITMAGNET_GRAPHQL_ENDPOINT, payload),
-      config.bitmagnet.retry
+      config.retry // Using general retry config
     );
 
     // CRITICAL FIX: Add explicit null/undefined check for response and response.data
@@ -237,9 +244,9 @@ async function getTorrentFiles(infoHash) {
         logger.error('Bitmagnet GraphQL Errors Array:', JSON.stringify(error.response.data.errors, null, 2));
       }
     } else if (error.request) {
-      logger.error('Bitmagnet Request was made but no response was received:', error.request);
+      logger.error('Bitmagnet Request was made but no response was received (network issue, CORS, etc.):', error.request);
     } else {
-      logger.error('Error setting up Bitmagnet torrent files request:', error.message);
+      logger.error('Error setting up Bitmagnet torrent files request (e.g., malformed URL):', error.message);
     }
     return [];
   }

@@ -6,7 +6,7 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-import { logger, getQuality } from './src/utils.js';
+import { logger, getQuality, formatSize } from './src/utils.js'; // Import formatSize
 import { getShowDetails, getMovieDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
@@ -179,34 +179,37 @@ async function startAddonServer() {
         const { type, id } = args;
         logger.info(`[ADDON] Stream request received for type: ${type}, id: ${id}`);
 
+        const mapToStreamObjects = (streams) => {
+            return streams.map(s => {
+                const prefix = s.isCached ? '⚡' : '⌛';
+                const sizeInfo = formatSize(s.size);
+                const title = `${s.torrentName}\n💾 ${sizeInfo} | 👤 ${s.seeders} seeders`;
+                const url = type === 'series'
+                    ? (s.isCached ? `${APP_HOST}/${ADDON_ID}/play-cached-series/${id}/${s.infoHash}` : `${APP_HOST}/${ADDON_ID}/process-new-series/${id}/${s.infoHash}/${s.fileIndex}`)
+                    : (s.isCached ? `${APP_HOST}/${ADDON_ID}/play-cached-movie/${id}/${s.infoHash}` : `${APP_HOST}/${ADDON_ID}/process-new-movie/${id}/${s.infoHash}`);
+                
+                return {
+                    name: `[${prefix} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
+                    title: title,
+                    url: url
+                };
+            });
+        };
+
         if (type === 'series') {
             const [imdbId, season, episode] = id.split(':');
-            const seasonNum = parseInt(season);
-            const episodeNum = parseInt(episode);
-
             const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = 'series' AND rd_torrent_info_json IS NOT NULL", [imdbId]);
             const showDetails = await getShowDetails(imdbId);
             if (!showDetails) return { streams: [] };
 
-            // --- THIS IS THE CORRECTED LOGIC ---
-            // We search Bitmagnet using ONLY the show's title to find all related torrents.
             const searchString = showDetails.name;
-            logger.debug(`[ADDON] Corrected series search string: "${searchString}"`);
             const newTorrents = await searchTorrents(searchString, 'tv_show');
             
-            const { streams, cachedStreams } = await matcher.findBestSeriesStreams(showDetails, seasonNum, episodeNum, newTorrents, rows, PREFERRED_LANGUAGES);
+            const { streams, cachedStreams } = await matcher.findBestSeriesStreams(showDetails, parseInt(season), parseInt(episode), newTorrents, rows, PREFERRED_LANGUAGES);
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
             
             logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for series ${id}`);
-            return {
-                streams: sortedStreams.map(s => ({
-                    name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
-                    title: `${s.torrentName}\n${s.seeders} seeders`,
-                    url: s.isCached
-                        ? `${APP_HOST}/${ADDON_ID}/play-cached-series/${id}/${s.infoHash}`
-                        : `${APP_HOST}/${ADDON_ID}/process-new-series/${id}/${s.infoHash}/${s.fileIndex}`
-                }))
-            };
+            return { streams: mapToStreamObjects(sortedStreams) };
         }
 
         if (type === 'movie') {
@@ -222,15 +225,7 @@ async function startAddonServer() {
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
 
             logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for movie ${id}`);
-            return {
-                streams: sortedStreams.map(s => ({
-                    name: `[${s.isCached ? '⚡' : '⌛'} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
-                    title: `${s.torrentName}\n${s.seeders} seeders`,
-                    url: s.isCached
-                        ? `${APP_HOST}/${ADDON_ID}/play-cached-movie/${id}/${s.infoHash}`
-                        : `${APP_HOST}/${ADDON_ID}/process-new-movie/${id}/${s.infoHash}`
-                }))
-            };
+            return { streams: mapToStreamObjects(sortedStreams) };
         }
 
         return { streams: [] };

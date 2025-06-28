@@ -12,7 +12,10 @@ const BITMAGNET_GRAPHQL_ENDPOINT = config.bitmagnet.graphqlEndpoint;
 
 /**
  * GraphQL fragment for common TorrentContent fields.
- * All GraphQL comments removed as per user's request.
+ * CRITICAL FIX: Re-aligned precisely with fields observed in the user's
+ * working 'query_log.txt' for the `torrentContent.search.items` structure.
+ * This includes `magnetUri` and `files` directly on TorrentContent,
+ * while also fetching essential nested `torrent` and `content` fields.
  */
 const TORRENT_CONTENT_FIELDS_FRAGMENT = `
   fragment TorrentContentFields on TorrentContent {
@@ -42,27 +45,42 @@ const TORRENT_CONTENT_FIELDS_FRAGMENT = `
     publishedAt
     createdAt
     updatedAt
-    torrent {
-      infoHash
+    magnetUri 
+    files { 
+      path
+      size
+      index
+      extension
+      fileType
+    }
+    torrent { 
       name
       size
-      filesStatus
-      filesCount
-      hasFilesInfo
-      singleFile
-      magnetUri
+      fileType
+      tagNames
     }
-    content {
+    content { 
       source
       id
       title
+      releaseDate
+      releaseYear
+      overview
+      runtime
+      externalLinks {
+        url
+      }
+      originalLanguage {
+        id
+        name
+      }
     }
   }
 `;
 
 /**
  * GraphQL query for searching torrent content.
- * All GraphQL comments removed as per user's request.
+ * Uses the fragment and includes totalCount and hasNextPage.
  */
 const TORRENT_CONTENT_SEARCH_QUERY = `
   ${TORRENT_CONTENT_FIELDS_FRAGMENT}
@@ -81,7 +99,6 @@ const TORRENT_CONTENT_SEARCH_QUERY = `
 
 /**
  * Fragment for TorrentFile fields.
- * All GraphQL comments removed as per user's request.
  */
 const TORRENT_FILE_FRAGMENT = `
   fragment TorrentFileFields on TorrentFile {
@@ -97,7 +114,6 @@ const TORRENT_FILE_FRAGMENT = `
 
 /**
  * Fragment for TorrentFilesQueryResult.
- * All GraphQL comments removed as per user's request.
  */
 const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
   ${TORRENT_FILE_FRAGMENT}
@@ -112,7 +128,7 @@ const TORRENT_FILES_QUERY_RESULT_FRAGMENT = `
 
 /**
  * GraphQL query for getting files within a specific torrent.
- * All GraphQL comments removed as per user's request.
+ * Uses the TorrentFilesQueryResult fragment.
  */
 const TORRENT_FILES_QUERY = `
   ${TORRENT_FILES_QUERY_RESULT_FRAGMENT}

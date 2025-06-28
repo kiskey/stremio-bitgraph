@@ -10,105 +10,104 @@ function getTitleSimilarity(tmdbTitle, torrentName) {
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
 }
 
-async function findBestFileMatch(files, season, episode) {
-    if (!files || files.length === 0) {
-        return null;
-    }
-
-    let bestMatch = null;
-    let highestScore = -1;
-
-    for (const file of files) {
-        // Only consider video files
-        if (file.fileType !== 'video') {
-            continue;
-        }
-
+export function findFileInTorrentInfo(torrentInfo, season, episode) {
+    for (const file of torrentInfo.files) {
         const fileInfo = PTT.parse(file.path);
-
         if (fileInfo.season === season && fileInfo.episode === episode) {
-            const score = file.size; // Use size as a tie-breaker, bigger is often better
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatch = { file, fileInfo };
-            }
+            // Return the file object from the RD JSON, which includes the private link
+            return file;
         }
     }
-    return bestMatch;
+    return null;
 }
 
-export async function findBestStreams(tmdbShow, season, episode, torrents) {
-    const matchedStreams = [];
+export async function findBestStreams(tmdbShow, season, episode, newTorrents, cachedTorrents) {
+    const streams = [];
+    const cachedStreams = [];
 
-    for (const torrent of torrents) {
-        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrent.name);
-
-        if (titleSimilarity < SIMILARITY_THRESHOLD) {
-            continue; // Skip torrents with low title similarity
+    // Process cached torrents first
+    for (const torrent of cachedTorrents) {
+        const file = findFileInTorrentInfo(torrent.rd_torrent_info_json, season, episode);
+        if (file) {
+            cachedStreams.push({
+                infoHash: torrent.infohash,
+                torrentName: torrent.rd_torrent_info_json.filename,
+                seeders: torrent.seeders,
+                language: torrent.language,
+                quality: torrent.quality,
+                isCached: true,
+            });
         }
+    }
+
+    // Process new torrents from Bitmagnet search
+    const cachedInfoHashes = new Set(cachedTorrents.map(t => t.infohash));
+    for (const torrent of newTorrents) {
+        // Avoid reprocessing if we already have it cached
+        if (cachedInfoHashes.has(torrent.infoHash)) continue;
+
+        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrent.name);
+        if (titleSimilarity < SIMILARITY_THRESHOLD) continue;
 
         const torrentInfo = PTT.parse(torrent.name);
 
-        // Case 1: Torrent is a single episode file
         if (torrent.filesStatus === 'single' && torrentInfo.season === season && torrentInfo.episode === episode) {
-            matchedStreams.push({
+            streams.push({
                 infoHash: torrent.infoHash,
-                fileIndex: 0, // In single file torrents, index is usually 0
-                name: `[${getQuality(torrent.videoResolution)}] ${torrent.name}`,
+                fileIndex: 0,
                 torrentName: torrent.name,
-                parsedInfo: torrentInfo,
                 seeders: torrent.seeders,
-                language: torrent.languages?.[0]?.id || 'en', // Default to 'en'
+                language: torrent.languages?.[0]?.id || 'en',
                 quality: getQuality(torrent.videoResolution),
+                isCached: false,
             });
             continue;
         }
 
-        // Case 2: Torrent is a pack, need to check files
         if (torrent.filesStatus === 'multi' || torrent.filesStatus === 'over_threshold') {
             const files = await getTorrentFiles(torrent.infoHash);
-            const bestFile = await findBestFileMatch(files, season, episode);
+            const bestFile = files.find(f => {
+                const fi = PTT.parse(f.path);
+                return f.fileType === 'video' && fi.season === season && fi.episode === episode;
+            });
 
             if (bestFile) {
-                matchedStreams.push({
+                streams.push({
                     infoHash: torrent.infoHash,
-                    fileIndex: bestFile.file.index,
-                    name: `[${getQuality(torrent.videoResolution)}] ${bestFile.file.path}`,
+                    fileIndex: bestFile.index,
                     torrentName: torrent.name,
-                    parsedInfo: bestFile.fileInfo,
                     seeders: torrent.seeders,
                     language: torrent.languages?.[0]?.id || 'en',
                     quality: getQuality(torrent.videoResolution),
+                    isCached: false,
                 });
             }
         }
     }
-    return matchedStreams;
+    return { streams, cachedStreams };
 }
 
 export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages) {
-    // 1. Prioritize by language
     const langIndexMap = new Map(preferredLanguages.map((lang, i) => [lang, i]));
     const getLangPriority = (lang) => langIndexMap.has(lang) ? langIndexMap.get(lang) : Infinity;
 
-    streams.sort((a, b) => {
+    const sortFn = (a, b) => {
         const langPriorityA = getLangPriority(a.language);
         const langPriorityB = getLangPriority(b.language);
         if (langPriorityA !== langPriorityB) return langPriorityA - langPriorityB;
 
-        // 2. Prioritize by quality
         const qualityA = QUALITY_ORDER[a.quality] || 99;
         const qualityB = QUALITY_ORDER[b.quality] || 99;
         if (qualityA !== qualityB) return qualityA - qualityB;
 
-        // 3. Prioritize by seeders
         return b.seeders - a.seeders;
-    });
+    };
 
-    // 4. Filter to max 2 results per quality, per language bucket
+    streams.sort(sortFn);
+    cachedStreams.sort(sortFn);
+
     const filteredStreams = [];
-    const counts = {}; // { "en_1080p": 1, "en_720p": 2, ... }
-
+    const counts = {};
     for (const stream of streams) {
         const key = `${stream.language}_${stream.quality}`;
         counts[key] = (counts[key] || 0) + 1;
@@ -116,13 +115,6 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
             filteredStreams.push(stream);
         }
     }
-
-    // 5. Prepend cached streams to the very top, sorted by quality
-    cachedStreams.sort((a, b) => {
-        const qualityA = QUALITY_ORDER[a.quality] || 99;
-        const qualityB = QUALITY_ORDER[b.quality] || 99;
-        return qualityA - qualityB;
-    });
 
     return [...cachedStreams, ...filteredStreams];
 }

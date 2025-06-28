@@ -4,23 +4,10 @@ export const manifest = {
     id: ADDON_ID,
     version: ADDON_VERSION,
     name: ADDON_NAME,
-    description: 'Streams TV Shows from Bitmagnet via Real-Debrid.',
+    description: 'Streams TV Shows from Bitmagnet via Real-Debrid. Configured via environment variables.',
     resources: ['stream'],
     types: ['series'],
     idPrefixes: ['tt'],
     catalogs: [],
-    config: [
-        {
-            key: 'realDebridApiKey',
-            type: 'text',
-            title: 'Real-Debrid API Token',
-            required: true,
-        },
-        {
-            key: 'preferredLanguages',
-            type: 'text',
-            title: 'Preferred Languages (comma-separated, e.g., en,fr)',
-            default: 'en',
-        },
-    ],
+    // The 'config' array is removed to prevent Stremio from prompting the user.
 };

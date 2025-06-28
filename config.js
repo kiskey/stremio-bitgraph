@@ -4,12 +4,17 @@ dotenv.config();
 // Server and Addon Configuration
 export const PORT = parseInt(process.env.PORT) || 7000;
 export const API_PORT = PORT + 1; // Internal port for the API server
-export const APP_HOST = process.env.APP_HOST || `http://127.0.0.1:${API_PORT}`;
-export const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // 'debug', 'info', 'warn', 'error'
 
+// The external-facing URL of your addon.
+// FOR REVERSE PROXY USERS (like you): This MUST be your public HTTPS domain.
+// Example: APP_HOST="https://sbd.mjlan.duckdns.org"
+// The reverse proxy should be configured to route this host to the internal API_PORT.
+export const APP_HOST = process.env.APP_HOST || `http://127.0.0.1:${API_PORT}`;
+
+export const LOG_LEVEL = process.env.LOG_LEVEL || 'info'; // 'debug', 'info', 'warn', 'error'
 export const ADDON_ID = 'org.stremio.realdebrid.bitmagnet';
 export const ADDON_NAME = 'Bitmagnet RD (Env)';
-export const ADDON_VERSION = '1.3.0'; // Version bump for new features
+export const ADDON_VERSION = '1.5.0'; // Version bump for new features
 
 // Service API Keys and Endpoints
 export const REALDEBRID_API_KEY = process.env.REALDEBRID_API_KEY;

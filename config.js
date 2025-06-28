@@ -8,7 +8,7 @@ export const APP_HOST = process.env.APP_HOST || `http://127.0.0.1:${API_PORT}`;
 export const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
 export const ADDON_ID = 'org.stremio.realdebrid.bitmagnet';
-export const ADDON_NAME = 'Bitmagnet RD (Env)';
+export const ADDON_NAME = 'Bitmagnet RD';
 export const ADDON_VERSION = '3.0.0'; // Major version for movie support
 
 // Service API Keys and Endpoints

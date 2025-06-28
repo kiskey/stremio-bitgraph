@@ -4,10 +4,10 @@ export const manifest = {
     id: ADDON_ID,
     version: ADDON_VERSION,
     name: ADDON_NAME,
-    description: 'Streams TV Shows from Bitmagnet via Real-Debrid. Configured via environment variables.',
+    description: 'Streams Movies & TV Shows from Bitmagnet via Real-Debrid.',
     resources: ['stream'],
-    types: ['series'],
+    // UPDATED: Now supports both movies and series
+    types: ['movie', 'series'],
     idPrefixes: ['tt'],
     catalogs: [],
-    // The 'config' array is removed to prevent Stremio from prompting the user.
 };

@@ -13,7 +13,6 @@ import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
 import PTT from 'parse-torrent-title';
 
-// ... (API server code remains identical) ...
 const processingTorrents = new Set();
 
 async function startApiServer() {
@@ -45,12 +44,11 @@ async function startApiServer() {
             const torrentName = readyTorrent.filename;
             const quality = getQuality(torrentName);
             
-            // We need to determine the language to save it correctly in the DB
-            const showDetails = await getShowDetails(imdbId);
-            const bitmagnetTorrent = await searchTorrents(`"${torrentName}"`);
-            const language = bitmagnetTorrent.length > 0
-                ? matcher.getBestLanguage(bitmagnetTorrent[0].languages, PREFERRED_LANGUAGES)
-                : 'en';
+            // --- CORRECTED LANGUAGE LOGIC ---
+            // Use PTT to parse the final torrent name. It's fast and doesn't require another API call.
+            // Default to 'en' if PTT can't find a language.
+            const language = PTT.parse(torrentName).languages?.[0] || 'en';
+            logger.debug(`[API] Determined language for DB save as "${language}" from torrent name.`);
             
             await pool.query(
                 `INSERT INTO torrents (infohash, tmdb_id, rd_torrent_info_json, language, quality, seeders)
@@ -170,7 +168,6 @@ async function startAddonServer() {
         const newTorrents = await searchTorrents(searchString);
         logger.debug(`[ADDON] Found ${newTorrents.length} new torrents from Bitmagnet.`);
 
-        // --- CHANGE IS HERE ---
         const { streams, cachedStreams } = await matcher.findBestStreams(showDetails, seasonNum, episodeNum, newTorrents, cachedTorrents, PREFERRED_LANGUAGES);
         const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for ${args.id}`);

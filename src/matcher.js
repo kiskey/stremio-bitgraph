@@ -4,6 +4,14 @@ import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
 import { logger, QUALITY_ORDER, getQuality, sanitizeName } from './utils.js';
 
+
+// ─── Fallback helper for “S01 EP(01–08)” etc ───────────────────────────────
+function fallbackParseSeasonPack(title) {
+  const m = title.match(/\b(?:S|Season)[\s._-]*0*(\d{1,2})\b/i);
+  if (m) return { season: parseInt(m[1], 10), episode: null };
+  return { season: null, episode: null };
+ }
+
 function getTitleSimilarity(tmdbTitle, torrentName) {
     if (!tmdbTitle) return 0;
     const parsed = PTT.parse(torrentName);
@@ -59,22 +67,35 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         }
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-        const torrentInfo = PTT.parse(sanitizedName);
-        logger.debug(`[MATCHER-SERIES] -> PTT found: Season ${torrentInfo.season || 'N/A'}, Episode ${torrentInfo.episode || 'N/A'}`);
-        logger.debug(`[MATCHER-SERIES] -> Full PTT parse result: ${JSON.stringify(torrentInfo)}`);
+        const primary = PTT.parse(sanitizedName);
+        logger.debug(`[MATCHER-SERIES] -> PTT found: Season ${primary.season || 'N/A'}, Episode ${primary.episode || 'N/A'}`);
+        logger.debug(`[MATCHER-SERIES] -> Full PTT parse result: ${JSON.stringify(primary)}`);
+        
+        let   topSeason    = primary.season;
+        let   topEpisode   = primary.episode;
+        if (!topSeason) {
+        const fb = fallbackParseSeasonPack(sanitizedName);
+        topSeason  = fb.season;
+        topEpisode = fb.episode;
+        logger.debug(`[MATCHER-SERIES] -> Fallback parse: ${JSON.stringify(fb)}`);
+     }
 
+   logger.debug(
+       `[MATCHER-SERIES] -> Parsed title => title="${primary.title}", ` +
+       `Season=${topSeason||'N/A'}, Episode=${topEpisode||'N/A'}`
+     );
 
         // --- FINAL, CORRECTED LOGIC ---
         // Case 1: Direct match on torrent name.
-        if (torrentInfo.season === season && torrentInfo.episode === episode) {
+        if (topSeason === season && topEpisode === episode) {
             logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
             streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
             continue;
         }
 
         // Case 2: PTT found a specific but *different* episode. Reject it.
-        if (torrentInfo.season && torrentInfo.episode) {
-            logger.debug(`[MATCHER-SERIES] -> REJECTED: Torrent name is for a different episode (S${torrentInfo.season}E${torrentInfo.episode}).`);
+        if (topSeason && topEpisode) {
+            logger.debug(`[MATCHER-SERIES] -> REJECTED: Torrent name is for a different episode (S${topSeason}E${topEpisode}).`);
             continue;
         }
 

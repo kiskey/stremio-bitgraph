@@ -74,10 +74,10 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         let   topSeason    = primary.season;
         let   topEpisode   = primary.episode;
         if (!topSeason) {
-        const fb = fallbackParseSeasonPack(sanitizedName);
-        topSeason  = fb.season;
-        topEpisode = fb.episode;
-        logger.debug(`[MATCHER-SERIES] -> Fallback parse: ${JSON.stringify(fb)}`);
+          const fb = fallbackParseSeasonPack(sanitizedName);
+          topSeason  = fb.season;
+          topEpisode = fb.episode;
+          logger.debug(`[MATCHER-SERIES] -> Fallback parse: ${JSON.stringify(fb)}`);
      }
 
    logger.debug(

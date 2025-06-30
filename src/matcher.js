@@ -85,7 +85,7 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         for (const file of files) {
             if (file.fileType !== 'video') continue;
             const fileInfo = PTT.parse(sanitizeName(file.path));
-            logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => ${JSON.stringify(parsedFileInfo)}`);
+            logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => ${JSON.stringify(fileInfo)}`);
             
             if (fileInfo.season === season && fileInfo.episode === episode) {
                 logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);

@@ -61,6 +61,8 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
         const torrentInfo = PTT.parse(sanitizedName);
         logger.debug(`[MATCHER-SERIES] -> PTT found: Season ${torrentInfo.season || 'N/A'}, Episode ${torrentInfo.episode || 'N/A'}`);
+        logger.debug(`[MATCHER-SERIES] -> Full PTT parse result: ${JSON.stringify(torrentInfo)}`);
+
 
         // --- FINAL, CORRECTED LOGIC ---
         // Case 1: Direct match on torrent name.
@@ -83,6 +85,8 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         for (const file of files) {
             if (file.fileType !== 'video') continue;
             const fileInfo = PTT.parse(sanitizeName(file.path));
+            logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => ${JSON.stringify(parsedFileInfo)}`);
+            
             if (fileInfo.season === season && fileInfo.episode === episode) {
                 logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
                 streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });

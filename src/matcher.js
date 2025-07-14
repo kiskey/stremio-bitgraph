@@ -1,6 +1,6 @@
 import PTT from 'parse-torrent-title';
 import stringSimilarity from 'string-similarity';
-import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER } from '../config.js';
+import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER, STREAM_LIMIT_PER_QUALITY } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
 import { logger, QUALITY_ORDER, getQuality, sanitizeName } from './utils.js';
 
@@ -192,7 +192,7 @@ export function sortAndFilterStreams(streams, cachedStreams, preferredLanguages)
     for (const stream of allStreams) {
         const key = `${stream.language}_${stream.quality}`;
         counts[key] = (counts[key] || 0) + 1;
-        if (counts[key] <= 2) {
+        if (counts[key] <= STREAM_LIMIT_PER_QUALITY) {
             finalStreams.push(stream);
         }
     }

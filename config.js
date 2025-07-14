@@ -23,6 +23,8 @@ export const PREFERRED_LANGUAGES = langs ? langs.split(',').map(l => l.trim()) :
 export const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD) || 0.75;
 // NEW: Optional strict language filtering
 export const STRICT_LANGUAGE_FILTER = process.env.STRICT_LANGUAGE_FILTER === 'true';
+// The number of streams to return for each language/quality combination.
+export const STREAM_LIMIT_PER_QUALITY = parseInt(process.env.STREAM_LIMIT_PER_QUALITY) || 2;
 
 // Critical validation
 if (!REALDEBRID_API_KEY || !TMDB_API_KEY || !BITMAGNET_GRAPHQL_ENDPOINT || !DATABASE_URL) {

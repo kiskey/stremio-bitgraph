@@ -1,20 +1,16 @@
-import PTT from 'parse-torrent-title';
 import stringSimilarity from 'string-similarity';
 import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER, STREAM_LIMIT_PER_QUALITY } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
-import { logger, QUALITY_ORDER, getQuality, sanitizeName } from './utils.js';
+// R8: Import new robust parser and remove PTT dependency from this file.
+import { logger, QUALITY_ORDER, getQuality, sanitizeName, robustParseInfo } from './utils.js';
 
-
-// ─── Fallback helper for “S01 EP(01–08)” etc ───────────────────────────────
-function fallbackParseSeasonPack(title) {
-  const m = title.match(/\b(?:S|Season)[\s._-]*0*(\d{1,2})\b/i);
-  if (m) return { season: parseInt(m[1], 10), episode: null };
-  return { season: null, episode: null };
- }
+// R8: This function is now redundant and has been removed. Its logic is inside robustParseInfo.
+// function fallbackParseSeasonPack(title) { ... }
 
 function getTitleSimilarity(tmdbTitle, torrentName) {
     if (!tmdbTitle) return 0;
-    const parsed = PTT.parse(torrentName);
+    // R8: Use robust parser to get the title.
+    const parsed = robustParseInfo(torrentName);
     if (!parsed.title) return 0;
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
 }
@@ -31,8 +27,12 @@ export function getBestLanguage(torrentLanguages, preferredLanguages) {
 }
 
 export function findFileInTorrentInfo(torrentInfo, season, episode) {
+    // R8: Get fallback season from parent torrent.
+    const { season: fallbackSeason } = robustParseInfo(torrentInfo.filename);
+
     for (const file of torrentInfo.files) {
-        const fileInfo = PTT.parse(sanitizeName(file.path));
+        // R8: Use robust parser for files, providing the fallback season.
+        const fileInfo = robustParseInfo(file.path, fallbackSeason);
         if (fileInfo.season === season && fileInfo.episode === episode) return file;
     }
     return null;
@@ -55,10 +55,8 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
         logger.debug(`[MATCHER-SERIES] Evaluating torrent: "${torrentData.name}"`);
-        const sanitizedName = sanitizeName(torrentData.name);
-        logger.debug(`[MATCHER-SERIES] -> Sanitized to: "${sanitizedName}"`);
 
-        const titleSimilarity = getTitleSimilarity(tmdbShow.name, sanitizedName);
+        const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
         logger.debug(`[MATCHER-SERIES] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
 
         if (titleSimilarity < SIMILARITY_THRESHOLD) {
@@ -67,25 +65,15 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         }
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
-        const primary = PTT.parse(sanitizedName);
-        logger.debug(`[MATCHER-SERIES] -> PTT found: Season ${primary.season || 'N/A'}, Episode ${primary.episode || 'N/A'}`);
-        logger.debug(`[MATCHER-SERIES] -> Full PTT parse result: ${JSON.stringify(primary)}`);
         
-        let   topSeason    = primary.season;
-        let   topEpisode   = primary.episode;
-        if (!topSeason) {
-          const fb = fallbackParseSeasonPack(sanitizedName);
-          topSeason  = fb.season;
-          topEpisode = fb.episode;
-          logger.debug(`[MATCHER-SERIES] -> Fallback parse: ${JSON.stringify(fb)}`);
-     }
+        // R8: Use the robust parser for the main torrent title.
+        const parsedInfo = robustParseInfo(torrentData.name);
+        const { season: topSeason, episode: topEpisode } = parsedInfo;
+        
+        logger.debug(
+            `[MATCHER-SERIES] -> Robust parse found: Season=${topSeason || 'N/A'}, Episode=${topEpisode || 'N/A'}`
+        );
 
-   logger.debug(
-       `[MATCHER-SERIES] -> Parsed title => title="${primary.title}", ` +
-       `Season=${topSeason||'N/A'}, Episode=${topEpisode||'N/A'}`
-     );
-
-        // --- FINAL, CORRECTED LOGIC ---
         // Case 1: Direct match on torrent name.
         if (topSeason === season && topEpisode === episode) {
             logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
@@ -93,31 +81,30 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
             continue;
         }
 
-        // Case 2: PTT found a specific but *different* episode. Reject it.
+        // Case 2: Torrent is for a specific but *different* episode. Reject it.
         if (topSeason && topEpisode) {
             logger.debug(`[MATCHER-SERIES] -> REJECTED: Torrent name is for a different episode (S${topSeason}E${topEpisode}).`);
             continue;
         }
 
-        // Case 3: PTT found a season pack or could not parse an episode number. Dive into files.
-        logger.debug(`[MATCHER-SERIES] -> Torrent is a pack or unspecific. Diving into files...`);
-        const files = await getTorrentFiles(torrent.infoHash);
-        if (!files || files.length === 0) continue;
-        for (const file of files) {
-            if (file.fileType !== 'video') continue;
-            const fileInfo = PTT.parse(sanitizeName(file.path));
-            logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => ${JSON.stringify(fileInfo)}`);
-            
-            // --- THIS IS THE FIX ---
-            // R5: If PTT doesn't find a season in the file path, but we already know the torrent's
-            // overall season from its title, we'll use that as the season for the file.
-            const fileSeason = fileInfo.season === undefined ? topSeason : fileInfo.season;
-
-            if (fileSeason === season && fileInfo.episode === episode) {
-                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
-                streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
-                break; // Found the matching file, no need to check other files in this torrent.
-            }
+        // Case 3: Torrent is a pack or unspecific. Dive into files.
+        if (topSeason === season) {
+             logger.debug(`[MATCHER-SERIES] -> Torrent is a pack or unspecific. Diving into files...`);
+             const files = await getTorrentFiles(torrent.infoHash);
+             if (!files || files.length === 0) continue;
+             for (const file of files) {
+                 if (file.fileType !== 'video') continue;
+                 
+                 // R8: Use robust parser, providing topSeason as a fallback.
+                 const fileInfo = robustParseInfo(file.path, topSeason);
+                 logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => Season=${fileInfo.season}, Episode=${fileInfo.episode}`);
+                 
+                 if (fileInfo.season === season && fileInfo.episode === episode) {
+                     logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
+                     streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+                     break;
+                 }
+             }
         }
     }
     return { streams, cachedStreams };
@@ -138,17 +125,15 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
         if (!torrentData || cachedInfoHashes.has(torrent.infoHash)) continue;
 
         logger.debug(`[MATCHER-MOVIE] Evaluating new torrent: "${torrentData.name}"`);
-        const sanitizedName = sanitizeName(torrentData.name);
-        logger.debug(`[MATCHER-MOVIE] -> Sanitized to: "${sanitizedName}"`);
 
-        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, sanitizedName);
+        const titleSimilarity = getTitleSimilarity(tmdbMovie.title, torrentData.name);
         logger.debug(`[MATCHER-MOVIE] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
         if (titleSimilarity < SIMILARITY_THRESHOLD) {
             logger.debug(`[MATCHER-MOVIE] -> REJECTED: Low title similarity.`);
             continue;
         }
 
-        const parsedInfo = PTT.parse(sanitizedName);
+        const parsedInfo = robustParseInfo(torrentData.name);
         const tmdbYear = new Date(tmdbMovie.release_date).getFullYear();
         const yearMatch = !parsedInfo.year || parsedInfo.year == tmdbYear;
         logger.debug(`[MATCHER-MOVIE] -> Year match: ${yearMatch} (Torrent: ${parsedInfo.year || 'N/A'}, TMDB: ${tmdbYear})`);

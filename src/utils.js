@@ -42,75 +42,60 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
-// R13: Rewritten robust parsing function based on log evidence.
+// This is the final, correct version incorporating all fixes and the robust, refactored logic.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
     
-    let season = pttResult.season;
-    let episode = pttResult.episode;
+    let { season, episode } = pttResult;
     
-    logger.debug(`[ROBUST-PARSER] PTT result for "${sanitizedTitle}": season=${season}, episode=${episode}`);
+    logger.debug(`[ROBUST-PARSER] Initial PTT for "${sanitizedTitle}": season=${season}, episode=${episode}`);
 
-    // If PTT found both, our job is done.
+    // Override PTT if an explicit episode range is detected.
+    const rangeRegex = /\b\d{1,2}[._\s-]*-[._\s-]*\d{1,2}\b/i;
+    if (rangeRegex.test(sanitizedTitle)) {
+        logger.debug(`[ROBUST-PARSER] Detected episode range. Forcing episode to undefined.`);
+        episode = undefined;
+    }
+
+    // If PTT found both and we didn't override, our job is done.
     if (season !== undefined && episode !== undefined) {
         return { ...pttResult, season, episode };
     }
 
-    // --- LOGIC CORRECTION ---
-    // The previous logic was flawed. We now check for ranges and apply fallbacks correctly.
-    const regexSanitized = sanitizedTitle.toLowerCase().replace(/[()\[\]]/g, ' ');
-    
-    // Step 1: Check for an episode range. If one exists, episode MUST be undefined.
-    const rangeRegex = /\b\d{1,2}[._\s-]*-[._\s-]*\d{1,2}\b/;
-    if (rangeRegex.test(regexSanitized)) {
-        logger.debug(`[ROBUST-PARSER] Detected episode range. Ensuring episode is treated as undefined.`);
-        episode = undefined;
-    }
+    // --- Unified Regex Fallback System ---
+    const regexSanitized = sanitizedTitle.toLowerCase().replace(/[()\[\]–×]/g, ' ');
 
-    // Step 2: If season is missing, try to find it.
-    if (season === undefined) {
-        const seasonRegexes = [
-            /season[._\s-]*(\d{1,2})/,
-            /\b[sS](\d{1,2})\b/
-        ];
-        for (const re of seasonRegexes) {
-            const match = regexSanitized.match(re);
-            if (match) {
-                season = parseInt(match[1], 10);
-                logger.debug(`[ROBUST-PARSER] Found season=${season} with regex.`);
-                break;
+    // Each regex now defines its capture groups for clarity and correctness.
+    const regexList = [
+        { re: /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/i, s: 1, e: 2 },
+        { re: /season[._\s-]*(\d{1,2})[._\s-]*ep[._\s-]*(\d{1,2})/i, s: 1, e: 2 },
+        { re: /[sStT](\d{1,2})[._\s-]*[eE](\d{1,2})/i, s: 1, e: 2 },
+        { re: /[sStT](\d{1,2})[._\s-]*[eE][pP](\d{1,2})/i, s: 1, e: 2 },
+        { re: /\b(\d{1,2})[xX](\d{1,2})\b/i, s: 1, e: 2 },
+        // Standalone patterns (last resort)
+        { re: /season[._\s-]*(\d{1,2})/i, s: 1, e: null },
+        { re: /\b[sStT](\d{1,2})\b/i, s: 1, e: null },
+        { re: /\b[eE][pP]?[._\s-]*(\d{1,2})\b/i, s: null, e: 1 },
+    ];
+
+    for (const { re, s: s_idx, e: e_idx } of regexList) {
+        if (season !== undefined && episode !== undefined) break; // Exit if we found both.
+
+        const match = regexSanitized.match(re);
+        if (match) {
+            if (season === undefined && s_idx !== null && match[s_idx]) {
+                season = parseInt(match[s_idx], 10);
+                logger.debug(`[ROBUST-PARSER] Found season=${season} with regex: ${re}`);
             }
-        }
-    }
-
-    // Step 3: If episode is still missing AND it's not a range pack, try to find it.
-    if (episode === undefined && !rangeRegex.test(regexSanitized)) {
-        const episodeRegexes = [
-             // Full words: episode 03
-            /episode[._\s-]*(\d{1,2})/,
-            // S01E03, s01e03
-            /[sS]\d{1,2}[._\s-]*[eE](\d{1,2})/,
-            // S01EP03, s01ep03
-            /[sS]\d{1,2}[._\s-]*[eE][pP](\d{1,2})/,
-             // 1x03, 1x03
-            /\b\d{1,2}[xX](\d{1,2})\b/,
-            // standalone E03, ep03
-            /\b[eE][pP]?[._\s-]*(\d{1,2})\b/,
-        ];
-        for (const re of episodeRegexes) {
-            // For regexes that capture season and episode, we need the second capture group.
-            const captureGroup = re.source.includes('[sS]') || re.source.includes('xX') ? 2 : 1;
-            const match = regexSanitized.match(re);
-            if (match && match[captureGroup]) {
-                episode = parseInt(match[captureGroup], 10);
-                logger.debug(`[ROBUST-PARSER] Found episode=${episode} with regex.`);
-                break;
+            if (episode === undefined && e_idx !== null && match[e_idx]) {
+                episode = parseInt(match[e_idx], 10);
+                logger.debug(`[ROBUST-PARSER] Found episode=${episode} with regex: ${re}`);
             }
         }
     }
     
-    // Apply fallback season if necessary
+    // Apply fallback season from parent torrent if we still don't have one.
     if (season === undefined && fallbackSeason !== null) {
         season = fallbackSeason;
     }

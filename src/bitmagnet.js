@@ -25,10 +25,14 @@ query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
   }
 }`;
 
+// R28: The query is enhanced to fetch all necessary fields for the adapter logic.
 const torrentFilesQuery = `
 query TorrentFiles($input: TorrentFilesQueryInput!) {
-  torrent {
-    files(input: $input) {
+  torrent(input: $input) {
+    name
+    size
+    filesCount
+    files {
       items {
         index
         path
@@ -60,8 +64,6 @@ async function queryGraphQL(query, variables) {
     }
 }
 
-// --- CORRECTED FUNCTION SIGNATURE AND LOGIC ---
-// It now accepts a contentType to correctly filter the search.
 export async function searchTorrents(searchString, contentType = 'tv_show') {
     logger.debug(`[BITMAGNET] Searching for contentType: "${contentType}"`);
     const data = await queryGraphQL(torrentContentSearchQuery, {
@@ -83,17 +85,42 @@ export async function searchTorrents(searchString, contentType = 'tv_show') {
     return items;
 }
 
+// R28: Rewritten function with robust adapter logic.
 export async function getTorrentFiles(infoHash) {
     const data = await queryGraphQL(torrentFilesQuery, {
         input: {
-            infoHashes: [infoHash],
-            limit: 1000
+            infoHashes: [infoHash]
         }
     });
-    const items = data?.torrent?.files?.items;
-    if (!items) {
-        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items.`);
+
+    if (!data?.torrent || data.torrent.length === 0) {
+        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no torrent object.`);
         return [];
     }
-    return items;
+    
+    const torrentData = Array.isArray(data.torrent) ? data.torrent[0] : data.torrent;
+    const files = torrentData?.files?.items;
+
+    // "Happy Path": If the API returns a populated file list, use it.
+    if (files && files.length > 0) {
+        logger.debug(`[BITMAGNET] Found ${files.length} files in the standard files.items array.`);
+        return files;
+    }
+
+    // "Adapter Path": If the file list is empty, but the API indicates it's a single-file torrent.
+    logger.debug(`[BITMAGNET] File list is empty. Checking if this is a single-file torrent.`);
+    if (torrentData.filesCount === 1 && torrentData.name) {
+        logger.info(`[BITMAGNET] API indicates a single-file torrent. Reformatting API response into the expected file-list structure.`);
+        // This is not synthesizing. It is reformatting the REAL data from the API.
+        const adaptedFile = {
+            index: 0,
+            path: torrentData.name, // Using the real name from the API
+            size: torrentData.size,   // Using the real size from the API
+            fileType: 'video'         // This is a safe assumption for single-file media torrents
+        };
+        return [adaptedFile];
+    }
+
+    logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no files and is not a recognized single-file torrent.`);
+    return [];
 }

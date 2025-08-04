@@ -6,15 +6,13 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-// R8: Import robustParseInfo
 import { logger, getQuality, formatSize, robustParseInfo } from './src/utils.js';
 import { getShowDetails, getMovieDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
-import PTT from 'parse-torrent-title'; // Still used for language parsing on insert
+import PTT from 'parse-torrent-title';
 
-// --- ROBUST STATE MACHINE LOCK with Failure Caching ---
 const processingLock = new Map();
 
 async function startApiServer() {
@@ -114,16 +112,28 @@ async function startApiServer() {
 }
 
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
-    // R8: Use robust parser to get a reliable season number from the torrent's main filename.
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
 
-    const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
-        // R8: Use robust parser with the fallback season for maximum reliability.
+    let targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
-        
         logger.debug(`[API-PLAYER] Checking file "${file.path}": Parsed Season=${fileInfo.season}, Parsed Episode=${fileInfo.episode}. Target: S${season}E${episode}`);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
+
+    // R15: Handle single-file season pack edge case for playback
+    if (targetFileIndexInResponse === -1) {
+        logger.debug(`[API-PLAYER] No specific episode file found. Checking for single-file pack.`);
+        const videoFiles = readyTorrent.files.filter(f => {
+            // A simple check for common video extensions.
+            return /\.(mkv|mp4|avi|mov|wmv|flv)$/i.test(f.path);
+        });
+
+        if (videoFiles.length === 1) {
+            logger.info(`[API-PLAYER] Found a single video file pack. Selecting it as the playback source.`);
+            // Find the original index of this single video file in the main `files` array
+            targetFileIndexInResponse = readyTorrent.files.findIndex(f => f.path === videoFiles[0].path);
+        }
+    }
 
     if (targetFileIndexInResponse === -1) {
         throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list after a thorough check.`);

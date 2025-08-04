@@ -28,93 +28,94 @@ export function formatSize(bytes) {
 
 export function sanitizeName(name) {
     let sanitized = name;
-
-    // 1. Remove anything inside special CJK brackets 【】
     sanitized = sanitized.replace(/【.*?】/g, ' ');
-
-    // 2. Remove sequences of non-Latin script characters
     sanitized = sanitized.replace(
         /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Arabic}\p{Script=Cyrillic}\p{Script=Thai}]+/gu,
         ' '
     );
-
-    // 3. Remove [ ... ] if it contains any non-English (non-alphanumeric/dash/space) characters
     sanitized = sanitized.replace(/\[.*?[^\w\s\-].*?\]/g, ' ');
-
-    // 4. Remove URLs, domains, or emails
     sanitized = sanitized.replace(/\b(https?:\/\/\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b/gi, ' ');
-
-    // 4b. Clean up stray hyphens or dashes left from domain removal
     sanitized = sanitized.replace(/^\s*[-–—]+\s*|\s*[-–—]+\s*$/g, ' ');
     sanitized = sanitized.replace(/\s+[-–—]+\s+/g, ' ');
-
-    // 5. Replace . and _ with space (but keep -)
     sanitized = sanitized.replace(/[._]/g, ' ');
-
-    // 6. Collapse multiple spaces and trim
     sanitized = sanitized.replace(/\s+/g, ' ').trim();
-
     return sanitized;
 }
 
-// R10: Fixed robust parsing function to correctly handle episode ranges.
+// R13: Rewritten robust parsing function based on log evidence.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
-    let { season, episode } = pttResult;
+    
+    let season = pttResult.season;
+    let episode = pttResult.episode;
+    
+    logger.debug(`[ROBUST-PARSER] PTT result for "${sanitizedTitle}": season=${season}, episode=${episode}`);
 
-    // Use fallback season if PTT fails for season
-    if (season === undefined && fallbackSeason !== null) {
-        season = fallbackSeason;
-    }
-
-    // If PTT got both, we are done.
+    // If PTT found both, our job is done.
     if (season !== undefined && episode !== undefined) {
         return { ...pttResult, season, episode };
     }
 
-    // --- REGEX FALLBACKS ---
-    const regexSanitized = sanitizedTitle
-        .replace(/[()\[\]]/g, ' ')
-        .replace(/[–×]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .toLowerCase();
-
-    const regexes = [
-        { re: /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        { re: /season[._\s-]*(\d{1,2})[._\s-]*ep[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        { re: /season[._\s-]*(\d{1,2})[._\s-]*e[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        { re: /[sS](\d{1,2})[._\s-]*[eE](\d{1,2})/, s: 1, e: 2 },
-        { re: /[sS](\d{1,2})[._\s-]*[eE][pP][._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        { re: /\b(\d{1,2})[xX](\d{1,2})\b/, s: 1, e: 2 },
-        { re: /\b(?<!\d)(\d)(\d{2})\b/, s: 1, e: 2 },
-        { re: /\b(\d{1,2})\.(\d{2})\b/, s: 1, e: 2 },
-    ];
-
-    for (const { re, s: s_idx, e: e_idx } of regexes) {
-        const match = regexSanitized.match(re);
-        if (match) {
-            if (season === undefined && s_idx) season = parseInt(match[s_idx], 10);
-            if (episode === undefined && e_idx) episode = parseInt(match[e_idx], 10);
-        }
-        if (season !== undefined && episode !== undefined) break;
+    // --- LOGIC CORRECTION ---
+    // The previous logic was flawed. We now check for ranges and apply fallbacks correctly.
+    const regexSanitized = sanitizedTitle.toLowerCase().replace(/[()\[\]]/g, ' ');
+    
+    // Step 1: Check for an episode range. If one exists, episode MUST be undefined.
+    const rangeRegex = /\b\d{1,2}[._\s-]*-[._\s-]*\d{1,2}\b/;
+    if (rangeRegex.test(regexSanitized)) {
+        logger.debug(`[ROBUST-PARSER] Detected episode range. Ensuring episode is treated as undefined.`);
+        episode = undefined;
     }
 
-    // Last-ditch effort for season or episode if one is still missing
+    // Step 2: If season is missing, try to find it.
     if (season === undefined) {
-        const seasonMatch = regexSanitized.match(/\b[sS](\d{1,2})\b/);
-        if (seasonMatch) season = parseInt(seasonMatch[1], 10);
+        const seasonRegexes = [
+            /season[._\s-]*(\d{1,2})/,
+            /\b[sS](\d{1,2})\b/
+        ];
+        for (const re of seasonRegexes) {
+            const match = regexSanitized.match(re);
+            if (match) {
+                season = parseInt(match[1], 10);
+                logger.debug(`[ROBUST-PARSER] Found season=${season} with regex.`);
+                break;
+            }
+        }
     }
-    if (episode === undefined) {
-        // R10 FIX: This regex now uses a negative lookahead `(?![-\d])` to ensure it doesn't match
-        // the start of a range (e.g., "01" in "01-07").
-        const episodeMatch = regexSanitized.match(/\b[eE][pP]?[._\s-]*(\d{1,2})(?![-\d])/);
-        if (episodeMatch) {
-            episode = parseInt(episodeMatch[1], 10);
-            logger.debug(`[ROBUST-PARSER] Last-ditch episode regex found: ${episode}`);
+
+    // Step 3: If episode is still missing AND it's not a range pack, try to find it.
+    if (episode === undefined && !rangeRegex.test(regexSanitized)) {
+        const episodeRegexes = [
+             // Full words: episode 03
+            /episode[._\s-]*(\d{1,2})/,
+            // S01E03, s01e03
+            /[sS]\d{1,2}[._\s-]*[eE](\d{1,2})/,
+            // S01EP03, s01ep03
+            /[sS]\d{1,2}[._\s-]*[eE][pP](\d{1,2})/,
+             // 1x03, 1x03
+            /\b\d{1,2}[xX](\d{1,2})\b/,
+            // standalone E03, ep03
+            /\b[eE][pP]?[._\s-]*(\d{1,2})\b/,
+        ];
+        for (const re of episodeRegexes) {
+            // For regexes that capture season and episode, we need the second capture group.
+            const captureGroup = re.source.includes('[sS]') || re.source.includes('xX') ? 2 : 1;
+            const match = regexSanitized.match(re);
+            if (match && match[captureGroup]) {
+                episode = parseInt(match[captureGroup], 10);
+                logger.debug(`[ROBUST-PARSER] Found episode=${episode} with regex.`);
+                break;
+            }
         }
     }
     
+    // Apply fallback season if necessary
+    if (season === undefined && fallbackSeason !== null) {
+        season = fallbackSeason;
+    }
+
+    logger.debug(`[ROBUST-PARSER] Final result: season=${season}, episode=${episode}`);
     return { ...pttResult, season, episode };
 }
 

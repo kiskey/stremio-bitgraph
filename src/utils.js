@@ -42,7 +42,7 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
-// R23: Fully rewritten function with a verifiable, prioritized, multi-stage parsing strategy.
+// This is the final, rewritten function with a verifiable, multi-gate, return-immediately strategy.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
@@ -52,65 +52,70 @@ export function robustParseInfo(title, fallbackSeason = null) {
     
     logger.debug(`[ROBUST-PARSER] Initial PTT for "${sanitizedTitle}": season=${season}, episode=${episode}`);
     
-    // If PTT gets a full result, trust it.
+    // Gate 1: If PTT gets a full result, trust it and exit immediately.
     if (season !== undefined && episode !== undefined) {
-        logger.debug(`[ROBUST-PARSER] Success: PTT found both season and episode.`);
+        logger.debug(`[ROBUST-PARSER] Gate 1 Success: PTT found both season and episode.`);
         return { ...pttResult, season, episode };
     }
 
     const regexSanitized = sanitizedTitle.toLowerCase().replace(/[()\[\]–×]/g, ' ');
 
-    // --- Stage 1: High-Confidence, Specific Episode Patterns ---
+    // Gate 2: High-Confidence, Specific Episode Patterns. If matched, exit immediately.
     const highConfidenceRegex = [
         /[sStT](\d{1,2})[._\s-]*[eE](\d{1,2})/i,
         /[sStT](\d{1,2})[._\s-]*[eE][pP](\d{1,2})/i,
         /\b(\d{1,2})[xX](\d{1,2})\b/i,
-        /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/i,
+        /season[._\s-]*(\d{1,2})[._\s-]*episode[sS]?[._\s-]*(\d{1,2})/i,
     ];
     for (const re of highConfidenceRegex) {
         const match = regexSanitized.match(re);
         if (match) {
             season = parseInt(match[1], 10);
             episode = parseInt(match[2], 10);
-            logger.debug(`[ROBUST-PARSER] Success: High-confidence regex matched S=${season}, E=${episode}.`);
+            logger.debug(`[ROBUST-PARSER] Gate 2 Success: High-confidence regex matched S=${season}, E=${episode}.`);
             return { ...pttResult, season, episode };
         }
     }
 
-    // --- Stage 2: Pack and Range Detection ---
+    // Gate 3: Pack and Range Detection. If matched, set episode to undefined and find season, then exit.
     const packRegex = [
         /episodes?[\s._-]*[\[(]?\s*\d{1,2}[\s._-]*?-[\s._-]*?\d{1,2}\s*[\])]?/i, // Ep 1-10, Episodes (01-10)
-        /\b(complete|season|s\d{1,2})\b/i, // "Complete", "Season 01", S01
+        /\b(complete|season[\s._-]*\d{1,2}|s\d{1,2})\b/i, // "Complete", "Season 01", S01
     ];
-    let isPack = false;
     for (const re of packRegex) {
         if (re.test(regexSanitized)) {
-            isPack = true;
             episode = undefined; // Force episode to be undefined for packs
-            logger.debug(`[ROBUST-PARSER] Info: Detected as a pack/range with regex: ${re}`);
-            break;
+            logger.debug(`[ROBUST-PARSER] Gate 3 Success: Detected as a pack/range with regex: ${re}`);
+            // Find season if it's missing
+            if (season === undefined) {
+                const seasonRegex = /\b(?:season|s|t)[\s._-]*(\d{1,2})\b/i;
+                const match = regexSanitized.match(seasonRegex);
+                if (match) {
+                    season = parseInt(match[1], 10);
+                }
+            }
+            logger.debug(`[ROBUST-PARSER] Final result for pack: season=${season}, episode=${episode}`);
+            return { ...pttResult, season, episode };
         }
     }
 
-    // --- Stage 3: Low-Confidence, Standalone Patterns (only if not a pack) ---
-    if (!isPack) {
-        if (episode === undefined) {
-            const standaloneEpisodeRegex = /\b[eE][pP]?[._\s-]*(\d{1,2})\b/i;
-            const match = regexSanitized.match(standaloneEpisodeRegex);
-            if (match) {
-                episode = parseInt(match[1], 10);
-                logger.debug(`[ROBUST-PARSER] Info: Found standalone episode=${episode}.`);
-            }
+    // Gate 4: Low-Confidence, Standalone Patterns (only if all else fails).
+    if (episode === undefined) {
+        const standaloneEpisodeRegex = /\b[eE][pP]?[._\s-]*(\d{1,2})\b/i;
+        const match = regexSanitized.match(standaloneEpisodeRegex);
+        if (match) {
+            episode = parseInt(match[1], 10);
+            logger.debug(`[ROBUST-PARSER] Gate 4 Info: Found standalone episode=${episode}.`);
         }
     }
     
-    // Find season if it's still missing
+    // Find season if it's still missing (can happen with standalone episode)
     if (season === undefined) {
         const seasonRegex = /\b(?:season|s|t)[\s._-]*(\d{1,2})\b/i;
         const match = regexSanitized.match(seasonRegex);
         if (match) {
             season = parseInt(match[1], 10);
-            logger.debug(`[ROBUST-PARSER] Info: Found standalone season=${season}.`);
+            logger.debug(`[ROBUST-PARSER] Gate 4 Info: Found standalone season=${season}.`);
         }
     }
 

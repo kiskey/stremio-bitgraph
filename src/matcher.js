@@ -83,35 +83,35 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         }
 
         if (topSeason === season) {
-             logger.debug(`[MATCHER-SERIES] -> Torrent is a pack or unspecific. Diving into files...`);
-             const files = await getTorrentFiles(torrent.infoHash);
-             if (!files || files.length === 0) continue;
+            logger.debug(`[MATCHER-SERIES] -> Torrent is a pack for the correct season. Diving into files...`);
+            const files = await getTorrentFiles(torrent.infoHash);
+            if (!files || files.length === 0) {
+                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no files.`);
+                continue;
+            }
 
-             let foundMatch = false;
-             for (const file of files) {
-                 if (file.fileType !== 'video') continue;
-                 
-                 logger.debug(`[MATCHER-SERIES] -> Checking file path: "${file.path}"`);
+            const videoFiles = files.filter(f => f.fileType === 'video');
+            if (videoFiles.length === 0) {
+                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no video files.`);
+                continue;
+            }
 
-                 const fileInfo = robustParseInfo(file.path, topSeason);
-                 logger.debug(`[MATCHER-SERIES] -> Parsed file result: Season=${fileInfo.season}, Episode=${fileInfo.episode}`);
-                 
-                 if (fileInfo.season === season && fileInfo.episode === episode) {
-                     logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
-                     streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
-                     foundMatch = true;
-                     break;
-                 }
-             }
+            logger.debug(`[MATCHER-SERIES] -> Found ${videoFiles.length} video file(s) in pack. Searching for S${season}E${episode}.`);
 
-            if (!foundMatch) {
-                const videoFiles = files.filter(f => f.fileType === 'video');
-                if (videoFiles.length === 1) {
-                    logger.debug(`[MATCHER-SERIES] -> No specific episode file found, but detected a single-file video pack. ACCEPTING.`);
-                    streams.push({ infoHash: torrent.infoHash, fileIndex: videoFiles[0].index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
-                } else {
-                    logger.debug(`[MATCHER-SERIES] -> No specific episode file found and not a single-file pack (${videoFiles.length} video files). REJECTING.`);
-                }
+            const matchingFile = videoFiles.find(file => {
+                logger.debug(`[MATCHER-SERIES] -> Checking file path: "${file.path}"`);
+                const fileInfo = robustParseInfo(file.path, topSeason);
+                return fileInfo.season === season && fileInfo.episode === episode;
+            });
+
+            if (matchingFile) {
+                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside pack: "${matchingFile.path}"`);
+                streams.push({ infoHash: torrent.infoHash, fileIndex: matchingFile.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+            } else if (videoFiles.length === 1) {
+                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: No specific episode match, but it's a single-file pack.`);
+                streams.push({ infoHash: torrent.infoHash, fileIndex: videoFiles[0].index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+            } else {
+                logger.debug(`[MATCHER-SERIES] -> REJECTED: Multi-file pack did not contain the requested episode.`);
             }
         }
     }
@@ -137,7 +137,7 @@ export async function findBestMovieStreams(tmdbMovie, newTorrents, cachedTorrent
         const titleSimilarity = getTitleSimilarity(tmdbMovie.title, torrentData.name);
         logger.debug(`[MATCHER-MOVIE] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
         if (titleSimilarity < SIMILARITY_THRESHOLD) {
-            logger.debug(`[MATCHER-MOVIE] -> REJECTED: Low title similarity.`);
+            logger.debug(`[MATCHER-SERIES] -> REJECTED: Low title similarity.`);
             continue;
         }
         

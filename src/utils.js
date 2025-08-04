@@ -57,7 +57,7 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
-// R8, R9: Upgraded robust parsing function with enhanced regex fallbacks.
+// R10: Fixed robust parsing function to correctly handle episode ranges.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
@@ -74,30 +74,20 @@ export function robustParseInfo(title, fallbackSeason = null) {
     }
 
     // --- REGEX FALLBACKS ---
-    // Perform a more aggressive local sanitization for regex matching
     const regexSanitized = sanitizedTitle
-        .replace(/[()\[\]]/g, ' ') // Remove brackets and parentheses
-        .replace(/[–×]/g, ' ')   // Remove en-dashes and multiplication signs
-        .replace(/\s+/g, ' ')     // Collapse spaces
+        .replace(/[()\[\]]/g, ' ')
+        .replace(/[–×]/g, ' ')
+        .replace(/\s+/g, ' ')
         .toLowerCase();
 
-    // Regexes are ordered by specificity (most specific first)
     const regexes = [
-        // Full words: season 01 episode 03
         { re: /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        // Full words variant: season 01 ep 03
         { re: /season[._\s-]*(\d{1,2})[._\s-]*ep[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        // Full words, episode only: season 01 E03 (e.g. from a file in a pack)
         { re: /season[._\s-]*(\d{1,2})[._\s-]*e[._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        // Standard: S01E03, S01.E03, S01-E03, S01 E03
         { re: /[sS](\d{1,2})[._\s-]*[eE](\d{1,2})/, s: 1, e: 2 },
-        // Standard with 'EP': S01EP03, S01 EP 03
         { re: /[sS](\d{1,2})[._\s-]*[eE][pP][._\s-]*(\d{1,2})/, s: 1, e: 2 },
-        // Alternative: 1x03, 1x03
         { re: /\b(\d{1,2})[xX](\d{1,2})\b/, s: 1, e: 2 },
-        // Ambiguous 3-digit: 103 -> S01E03. Must not be preceded by other digits.
         { re: /\b(?<!\d)(\d)(\d{2})\b/, s: 1, e: 2 },
-        // Ambiguous dot-format: 1.03. Must be whole words.
         { re: /\b(\d{1,2})\.(\d{2})\b/, s: 1, e: 2 },
     ];
 
@@ -107,7 +97,7 @@ export function robustParseInfo(title, fallbackSeason = null) {
             if (season === undefined && s_idx) season = parseInt(match[s_idx], 10);
             if (episode === undefined && e_idx) episode = parseInt(match[e_idx], 10);
         }
-        if (season !== undefined && episode !== undefined) break; // Found both, exit
+        if (season !== undefined && episode !== undefined) break;
     }
 
     // Last-ditch effort for season or episode if one is still missing
@@ -116,9 +106,13 @@ export function robustParseInfo(title, fallbackSeason = null) {
         if (seasonMatch) season = parseInt(seasonMatch[1], 10);
     }
     if (episode === undefined) {
-        // standalone E01, EP 01 etc.
-        const episodeMatch = regexSanitized.match(/\b[eE][pP]?[._\s-]*(\d{1,2})\b/);
-        if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
+        // R10 FIX: This regex now uses a negative lookahead `(?![-\d])` to ensure it doesn't match
+        // the start of a range (e.g., "01" in "01-07").
+        const episodeMatch = regexSanitized.match(/\b[eE][pP]?[._\s-]*(\d{1,2})(?![-\d])/);
+        if (episodeMatch) {
+            episode = parseInt(episodeMatch[1], 10);
+            logger.debug(`[ROBUST-PARSER] Last-ditch episode regex found: ${episode}`);
+        }
     }
     
     return { ...pttResult, season, episode };

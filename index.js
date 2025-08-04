@@ -60,7 +60,6 @@ async function startApiServer() {
                     try {
                         logger.info(`[API] No cache hit for ${infoHash}. Starting new RD process.`);
                         
-                        // R30: Re-implement the "check-first" logic as it's the only reliable method.
                         const activeTorrents = await rd.getTorrents(REALDEBRID_API_KEY);
                         const existingTorrent = activeTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
                         
@@ -75,7 +74,6 @@ async function startApiServer() {
                             const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
                             if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
                             torrentId = addResult.id;
-                            // Only select files for newly added torrents.
                             await rd.selectFiles(torrentId, 'all', REALDEBRID_API_KEY);
                         }
 
@@ -126,35 +124,44 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
+// R30: Rewritten to be robust against index mismatches.
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
 
-    let targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
+    // Step 1: Filter the file list to only include files selected for download.
+    // This ensures our indices will match the `links` array.
+    const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
+    logger.debug(`[API-PLAYER] Original file count: ${readyTorrent.files.length}. Selected file count: ${selectedFiles.length}. Links count: ${readyTorrent.links.length}.`);
+
+    // Step 2: Search for the target episode ONLY within the selected files.
+    const targetFileIndexInSelected = selectedFiles.findIndex(file => {
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
-        logger.debug(`[API-PLAYER] Checking file "${file.path}": Parsed Season=${fileInfo.season}, Parsed Episode=${fileInfo.episode}. Target: S${season}E${episode}`);
+        logger.debug(`[API-PLAYER] Checking selected file "${file.path}": Parsed S=${fileInfo.season}, E=${fileInfo.episode}. Target: S${season}E${episode}`);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
 
-    if (targetFileIndexInResponse === -1) {
-        logger.debug(`[API-PLAYER] No specific episode file found. Checking for single-file pack.`);
-        const videoFiles = readyTorrent.files.filter(f => {
-            return /\.(mkv|mp4|avi|mov|wmv|flv)$/i.test(f.path);
-        });
-
-        if (videoFiles.length === 1) {
-            logger.info(`[API-PLAYER] Found a single video file pack. Selecting it as the playback source.`);
-            targetFileIndexInResponse = readyTorrent.files.findIndex(f => f.path === videoFiles[0].path);
+    // Step 3 (Fallback): If no specific episode is found, check if it's a single-file pack.
+    if (targetFileIndexInSelected === -1 && selectedFiles.length === 1) {
+        logger.info(`[API-PLAYER] No specific episode found, but it's a single selected file. Assuming it's the correct one.`);
+        // The index will be 0 because it's the only item in the `selectedFiles` array.
+        const singleFile = selectedFiles[0];
+        const fileInfo = robustParseInfo(singleFile.path, fallbackSeason);
+        // We accept it as long as the season matches (or if we can't determine the season from the file)
+        if (fileInfo.season === parseInt(season, 10) || fileInfo.season === undefined) {
+             return 0; // Use the first (and only) index.
         }
     }
 
-    if (targetFileIndexInResponse === -1) {
-        throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list after a thorough check.`);
+    if (targetFileIndexInSelected === -1) {
+        throw new Error(`Could not find S${season}E${episode} in the torrent's selected file list.`);
     }
 
-    logger.info(`[API-PLAYER] Found S${season}E${episode} at file index ${targetFileIndexInResponse}.`);
-    const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
+    logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${targetFileIndexInSelected} of the selected files.`);
+    
+    // The index from our filtered list now correctly corresponds to the links array.
+    const linkToUnrestrict = readyTorrent.links[targetFileIndexInSelected];
     if (!linkToUnrestrict) {
-        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInSelected}. This indicates a mismatch between RD's files and links arrays.`);
     }
 
     const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);

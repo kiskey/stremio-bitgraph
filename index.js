@@ -6,13 +6,13 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-// --- THIS IS THE FIX: Added 'formatSize' to the import list ---
-import { logger, getQuality, formatSize } from './src/utils.js';
+// R8: Import robustParseInfo
+import { logger, getQuality, formatSize, robustParseInfo } from './src/utils.js';
 import { getShowDetails, getMovieDetails } from './src/tmdb.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import * as rd from './src/realdebrid.js';
-import PTT from 'parse-torrent-title';
+import PTT from 'parse-torrent-title'; // Still used for language parsing on insert
 
 // --- ROBUST STATE MACHINE LOCK with Failure Caching ---
 const processingLock = new Map();
@@ -114,15 +114,31 @@ async function startApiServer() {
 }
 
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
+    // R8: Use robust parser to get a reliable season number from the torrent's main filename.
+    const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
+
     const targetFileIndexInResponse = readyTorrent.files.findIndex(file => {
-        const fileInfo = PTT.parse(file.path);
+        // R8: Use robust parser with the fallback season for maximum reliability.
+        const fileInfo = robustParseInfo(file.path, fallbackSeason);
+        
+        logger.debug(`[API-PLAYER] Checking file "${file.path}": Parsed Season=${fileInfo.season}, Parsed Episode=${fileInfo.episode}. Target: S${season}E${episode}`);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
-    if (targetFileIndexInResponse === -1) throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list.`);
+
+    if (targetFileIndexInResponse === -1) {
+        throw new Error(`Could not find S${season}E${episode} in the torrent pack's file list after a thorough check.`);
+    }
+
+    logger.info(`[API-PLAYER] Found S${season}E${episode} at file index ${targetFileIndexInResponse}.`);
     const linkToUnrestrict = readyTorrent.links[targetFileIndexInResponse];
-    if (!linkToUnrestrict) throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+    if (!linkToUnrestrict) {
+        throw new Error(`Could not find a corresponding link at verified index ${targetFileIndexInResponse}.`);
+    }
+
     const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
-    if (!unrestricted) throw new Error('Failed to unrestrict link.');
+    if (!unrestricted) {
+        throw new Error('Failed to unrestrict link.');
+    }
     res.redirect(unrestricted.download);
 }
 
@@ -146,7 +162,7 @@ async function startAddonServer() {
         const mapToStreamObjects = (streams) => {
             return streams.map(s => {
                 const prefix = s.isCached ? '⚡' : '⌛';
-                const sizeInfo = formatSize(s.size); // This line was causing the crash
+                const sizeInfo = formatSize(s.size);
                 const title = `${s.torrentName}\n💾 ${sizeInfo} | 👤 ${s.seeders} seeders`;
                 const url = `${APP_HOST}/${ADDON_ID}/stream/${type}/${id}/${s.infoHash}`;
                 

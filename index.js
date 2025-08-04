@@ -59,12 +59,27 @@ async function startApiServer() {
                 const processPromise = new Promise(async (resolve, reject) => {
                     try {
                         logger.info(`[API] No cache hit for ${infoHash}. Starting new RD process.`);
-                        const magnet = `magnet:?xt=urn:btih:${infoHash}`;
-                        const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
-                        if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
+                        
+                        // R30: Re-implement the "check-first" logic as it's the only reliable method.
+                        const activeTorrents = await rd.getTorrents(REALDEBRID_API_KEY);
+                        const existingTorrent = activeTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
+                        
+                        let torrentId;
 
-                        await rd.selectFiles(addResult.id, 'all', REALDEBRID_API_KEY);
-                        const readyTorrent = await rd.pollTorrentUntilReady(addResult.id, REALDEBRID_API_KEY);
+                        if (existingTorrent) {
+                            logger.info(`[API] Torrent with hash ${infoHash} already exists on Real-Debrid (ID: ${existingTorrent.id}). Re-using it.`);
+                            torrentId = existingTorrent.id;
+                        } else {
+                            logger.info(`[API] Torrent with hash ${infoHash} not found on Real-Debrid. Adding it now.`);
+                            const magnet = `magnet:?xt=urn:btih:${infoHash}`;
+                            const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
+                            if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
+                            torrentId = addResult.id;
+                            // Only select files for newly added torrents.
+                            await rd.selectFiles(torrentId, 'all', REALDEBRID_API_KEY);
+                        }
+
+                        const readyTorrent = await rd.pollTorrentUntilReady(torrentId, REALDEBRID_API_KEY);
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
                         await pool.query(
@@ -120,17 +135,14 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
 
-    // R15: Handle single-file season pack edge case for playback
     if (targetFileIndexInResponse === -1) {
         logger.debug(`[API-PLAYER] No specific episode file found. Checking for single-file pack.`);
         const videoFiles = readyTorrent.files.filter(f => {
-            // A simple check for common video extensions.
             return /\.(mkv|mp4|avi|mov|wmv|flv)$/i.test(f.path);
         });
 
         if (videoFiles.length === 1) {
             logger.info(`[API-PLAYER] Found a single video file pack. Selecting it as the playback source.`);
-            // Find the original index of this single video file in the main `files` array
             targetFileIndexInResponse = readyTorrent.files.findIndex(f => f.path === videoFiles[0].path);
         }
     }

@@ -1,5 +1,6 @@
 import winston from 'winston';
 import { LOG_LEVEL } from '../config.js';
+import PTT from 'parse-torrent-title';
 
 export const logger = winston.createLogger({
     level: LOG_LEVEL,
@@ -56,9 +57,72 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
+// R8, R9: Upgraded robust parsing function with enhanced regex fallbacks.
+export function robustParseInfo(title, fallbackSeason = null) {
+    const sanitizedTitle = sanitizeName(title);
+    const pttResult = PTT.parse(sanitizedTitle);
+    let { season, episode } = pttResult;
 
+    // Use fallback season if PTT fails for season
+    if (season === undefined && fallbackSeason !== null) {
+        season = fallbackSeason;
+    }
 
+    // If PTT got both, we are done.
+    if (season !== undefined && episode !== undefined) {
+        return { ...pttResult, season, episode };
+    }
 
+    // --- REGEX FALLBACKS ---
+    // Perform a more aggressive local sanitization for regex matching
+    const regexSanitized = sanitizedTitle
+        .replace(/[()\[\]]/g, ' ') // Remove brackets and parentheses
+        .replace(/[–×]/g, ' ')   // Remove en-dashes and multiplication signs
+        .replace(/\s+/g, ' ')     // Collapse spaces
+        .toLowerCase();
+
+    // Regexes are ordered by specificity (most specific first)
+    const regexes = [
+        // Full words: season 01 episode 03
+        { re: /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/, s: 1, e: 2 },
+        // Full words variant: season 01 ep 03
+        { re: /season[._\s-]*(\d{1,2})[._\s-]*ep[._\s-]*(\d{1,2})/, s: 1, e: 2 },
+        // Full words, episode only: season 01 E03 (e.g. from a file in a pack)
+        { re: /season[._\s-]*(\d{1,2})[._\s-]*e[._\s-]*(\d{1,2})/, s: 1, e: 2 },
+        // Standard: S01E03, S01.E03, S01-E03, S01 E03
+        { re: /[sS](\d{1,2})[._\s-]*[eE](\d{1,2})/, s: 1, e: 2 },
+        // Standard with 'EP': S01EP03, S01 EP 03
+        { re: /[sS](\d{1,2})[._\s-]*[eE][pP][._\s-]*(\d{1,2})/, s: 1, e: 2 },
+        // Alternative: 1x03, 1x03
+        { re: /\b(\d{1,2})[xX](\d{1,2})\b/, s: 1, e: 2 },
+        // Ambiguous 3-digit: 103 -> S01E03. Must not be preceded by other digits.
+        { re: /\b(?<!\d)(\d)(\d{2})\b/, s: 1, e: 2 },
+        // Ambiguous dot-format: 1.03. Must be whole words.
+        { re: /\b(\d{1,2})\.(\d{2})\b/, s: 1, e: 2 },
+    ];
+
+    for (const { re, s: s_idx, e: e_idx } of regexes) {
+        const match = regexSanitized.match(re);
+        if (match) {
+            if (season === undefined && s_idx) season = parseInt(match[s_idx], 10);
+            if (episode === undefined && e_idx) episode = parseInt(match[e_idx], 10);
+        }
+        if (season !== undefined && episode !== undefined) break; // Found both, exit
+    }
+
+    // Last-ditch effort for season or episode if one is still missing
+    if (season === undefined) {
+        const seasonMatch = regexSanitized.match(/\b[sS](\d{1,2})\b/);
+        if (seasonMatch) season = parseInt(seasonMatch[1], 10);
+    }
+    if (episode === undefined) {
+        // standalone E01, EP 01 etc.
+        const episodeMatch = regexSanitized.match(/\b[eE][pP]?[._\s-]*(\d{1,2})\b/);
+        if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
+    }
+    
+    return { ...pttResult, season, episode };
+}
 
 
 export const QUALITY_ORDER = {
@@ -74,4 +138,4 @@ export const getQuality = (resolution) => {
     if (res.includes('480')) return '480p';
     if (res.includes('360')) return '360p';
     return 'sd';
-}
+};

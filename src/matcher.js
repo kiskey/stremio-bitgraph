@@ -108,10 +108,15 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
             const fileInfo = PTT.parse(sanitizeName(file.path));
             logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => ${JSON.stringify(fileInfo)}`);
             
-            if (fileInfo.season === season && fileInfo.episode === episode) {
+            // --- THIS IS THE FIX ---
+            // R5: If PTT doesn't find a season in the file path, but we already know the torrent's
+            // overall season from its title, we'll use that as the season for the file.
+            const fileSeason = fileInfo.season === undefined ? topSeason : fileInfo.season;
+
+            if (fileSeason === season && fileInfo.episode === episode) {
                 logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
                 streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
-                break;
+                break; // Found the matching file, no need to check other files in this torrent.
             }
         }
     }

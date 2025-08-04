@@ -83,10 +83,18 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         }
 
         if (topSeason === season) {
-            logger.debug(`[MATCHER-SERIES] -> Torrent is a pack for the correct season. Diving into files...`);
+            logger.debug(`[MATCHER-SERIES] -> Torrent is a pack for the correct season. Checking file readiness...`);
+            
+            // R29: The definitive "state-aware" check.
+            if (!torrentData.hasFilesInfo) {
+                logger.warn(`[MATCHER-SERIES] -> REJECTED: Torrent pack '${torrentData.name}' has hasFilesInfo=false. Files are not indexed yet.`);
+                continue;
+            }
+
+            logger.debug(`[MATCHER-SERIES] -> Files are indexed (hasFilesInfo=true). Diving into files...`);
             const files = await getTorrentFiles(torrent.infoHash);
             if (!files || files.length === 0) {
-                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no files.`);
+                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no files according to the API.`);
                 continue;
             }
 

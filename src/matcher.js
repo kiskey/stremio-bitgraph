@@ -1,7 +1,7 @@
 import stringSimilarity from 'string-similarity';
 import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER, STREAM_LIMIT_PER_QUALITY } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
-// R12: Import PTT directly for diagnostics
+// R14: Import PTT directly for diagnostics
 import PTT from 'parse-torrent-title';
 import { logger, QUALITY_ORDER, getQuality, sanitizeName, robustParseInfo } from './utils.js';
 
@@ -52,10 +52,9 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
 
         logger.debug(`[MATCHER-SERIES] Evaluating torrent: "${torrentData.name}"`);
 
-        // R12: Add diagnostic logging to get raw PTT output
+        // R14: Diagnostic logging is kept for future debugging.
         const sanitizedForDiag = sanitizeName(torrentData.name);
-        const pttDirectResult = PTT.parse(sanitizedForDiag);
-        logger.debug(`[DIAGNOSTIC-PTT] Raw PTT result for "${sanitizedForDiag}": ${JSON.stringify(pttDirectResult)}`);
+        logger.debug(`[DIAGNOSTIC-PTT] Raw PTT result for "${sanitizedForDiag}": ${JSON.stringify(PTT.parse(sanitizedForDiag))}`);
 
         const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
         logger.debug(`[MATCHER-SERIES] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
@@ -92,6 +91,8 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
              logger.debug(`[MATCHER-SERIES] -> Torrent is a pack or unspecific. Diving into files...`);
              const files = await getTorrentFiles(torrent.infoHash);
              if (!files || files.length === 0) continue;
+
+             let foundMatch = false;
              for (const file of files) {
                  if (file.fileType !== 'video') continue;
                  
@@ -101,9 +102,21 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
                  if (fileInfo.season === season && fileInfo.episode === episode) {
                      logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside torrent: "${file.path}"`);
                      streams.push({ infoHash: torrent.infoHash, fileIndex: file.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+                     foundMatch = true;
                      break;
                  }
              }
+
+            // R15: Handle single-file season pack edge case
+            if (!foundMatch) {
+                const videoFiles = files.filter(f => f.fileType === 'video');
+                if (videoFiles.length === 1) {
+                    logger.debug(`[MATCHER-SERIES] -> No specific episode file found, but detected a single-file video pack. ACCEPTING.`);
+                    streams.push({ infoHash: torrent.infoHash, fileIndex: videoFiles[0].index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+                } else {
+                    logger.debug(`[MATCHER-SERIES] -> No specific episode file found and not a single-file pack (${videoFiles.length} video files). REJECTING.`);
+                }
+            }
         }
     }
     return { streams, cachedStreams };

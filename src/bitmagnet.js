@@ -2,6 +2,7 @@ import axios from 'axios';
 import { BITMAGNET_GRAPHQL_ENDPOINT } from '../config.js';
 import { logger } from './utils.js';
 
+// R29: The search query is enhanced to fetch the critical `hasFilesInfo` status.
 const torrentContentSearchQuery = `
 query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
   torrentContent {
@@ -19,14 +20,13 @@ query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
           size
           filesStatus
           filesCount
+          hasFilesInfo
         }
       }
     }
   }
 }`;
 
-// R29: This query is now 100% compliant with the provided GraphQL schema.
-// It correctly follows the nested structure `query { torrent { files(input: ...) } }`.
 const torrentFilesQuery = `
 query TorrentFiles($input: TorrentFilesQueryInput!) {
   torrent {
@@ -86,25 +86,22 @@ export async function searchTorrents(searchString, contentType = 'tv_show') {
     return items;
 }
 
-// R29: The function and its call are now fully schema-compliant, removing the need for complex workarounds.
-// The second argument `torrentDataFromSearch` is no longer needed as the query is now reliable.
+// This function is now schema-compliant and correct. No changes needed.
 export async function getTorrentFiles(infoHash) {
     const data = await queryGraphQL(torrentFilesQuery, {
         input: {
             infoHashes: [infoHash],
-            limit: 1000 // A reasonable limit for files in a pack
+            limit: 1000
         }
     });
     
-    // According to the schema, the response will always be in `data.torrent.files.items`.
     const items = data?.torrent?.files?.items;
 
     if (!items) {
-        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items or an unexpected structure. This may indicate an actual empty torrent or an API issue.`);
+        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items or an unexpected structure.`);
         return [];
     }
 
-    // Now that the query is correct, we can trust the API's response directly.
     logger.debug(`[BITMAGNET] Successfully retrieved ${items.length} file(s) for infohash ${infoHash}.`);
     return items;
 }

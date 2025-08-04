@@ -42,58 +42,79 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
-// R22: Final enhancement to range detection regex.
+// R23: Fully rewritten function with a verifiable, prioritized, multi-stage parsing strategy.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
     
-    let { season, episode } = pttResult;
+    let season = pttResult.season;
+    let episode = pttResult.episode;
     
     logger.debug(`[ROBUST-PARSER] Initial PTT for "${sanitizedTitle}": season=${season}, episode=${episode}`);
-
-    // R22 FIX IS HERE: The regex is now more flexible and looks for a word boundary `\b`
-    // to ensure it can find the range pattern anywhere in the string.
-    const rangeRegex = /\b(episodes?|ep|e)[\s._-]*[\[(]?\s*\d{1,2}[\s._-]*?-[\s._-]*?\d{1,2}\s*[\])]?/i;
-    if (rangeRegex.test(sanitizedTitle)) {
-        logger.debug(`[ROBUST-PARSER] Detected episode range in "${sanitizedTitle}". Forcing episode to undefined.`);
-        episode = undefined;
-    }
-
-    // If PTT found both and we didn't override, our job is done.
+    
+    // If PTT gets a full result, trust it.
     if (season !== undefined && episode !== undefined) {
+        logger.debug(`[ROBUST-PARSER] Success: PTT found both season and episode.`);
         return { ...pttResult, season, episode };
     }
 
-    // --- Unified Regex Fallback System ---
     const regexSanitized = sanitizedTitle.toLowerCase().replace(/[()\[\]–×]/g, ' ');
 
-    const regexList = [
-        { re: /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/i, s: 1, e: 2 },
-        { re: /season[._\s-]*(\d{1,2})[._\s-]*ep[._\s-]*(\d{1,2})/i, s: 1, e: 2 },
-        { re: /[sStT](\d{1,2})[._\s-]*[eE](\d{1,2})/i, s: 1, e: 2 },
-        { re: /[sStT](\d{1,2})[._\s-]*[eE][pP](\d{1,2})/i, s: 1, e: 2 },
-        { re: /\b(\d{1,2})[xX](\d{1,2})\b/i, s: 1, e: 2 },
-        { re: /season[._\s-]*(\d{1,2})/i, s: 1, e: null },
-        { re: /\b[sStT](\d{1,2})\b/i, s: 1, e: null },
-        { re: /\b[eE][pP]?[._\s-]*(\d{1,2})\b/i, s: null, e: 1 },
+    // --- Stage 1: High-Confidence, Specific Episode Patterns ---
+    const highConfidenceRegex = [
+        /[sStT](\d{1,2})[._\s-]*[eE](\d{1,2})/i,
+        /[sStT](\d{1,2})[._\s-]*[eE][pP](\d{1,2})/i,
+        /\b(\d{1,2})[xX](\d{1,2})\b/i,
+        /season[._\s-]*(\d{1,2})[._\s-]*episode[._\s-]*(\d{1,2})/i,
     ];
-
-    for (const { re, s: s_idx, e: e_idx } of regexList) {
-        if ((season !== undefined && episode !== undefined) || (e_idx && rangeRegex.test(sanitizedTitle))) continue;
-
+    for (const re of highConfidenceRegex) {
         const match = regexSanitized.match(re);
         if (match) {
-            if (season === undefined && s_idx !== null && match[s_idx]) {
-                season = parseInt(match[s_idx], 10);
-                logger.debug(`[ROBUST-PARSER] Found season=${season} with regex: ${re}`);
-            }
-            if (episode === undefined && e_idx !== null && match[e_idx]) {
-                episode = parseInt(match[e_idx], 10);
-                logger.debug(`[ROBUST-PARSER] Found episode=${episode} with regex: ${re}`);
+            season = parseInt(match[1], 10);
+            episode = parseInt(match[2], 10);
+            logger.debug(`[ROBUST-PARSER] Success: High-confidence regex matched S=${season}, E=${episode}.`);
+            return { ...pttResult, season, episode };
+        }
+    }
+
+    // --- Stage 2: Pack and Range Detection ---
+    const packRegex = [
+        /episodes?[\s._-]*[\[(]?\s*\d{1,2}[\s._-]*?-[\s._-]*?\d{1,2}\s*[\])]?/i, // Ep 1-10, Episodes (01-10)
+        /\b(complete|season|s\d{1,2})\b/i, // "Complete", "Season 01", S01
+    ];
+    let isPack = false;
+    for (const re of packRegex) {
+        if (re.test(regexSanitized)) {
+            isPack = true;
+            episode = undefined; // Force episode to be undefined for packs
+            logger.debug(`[ROBUST-PARSER] Info: Detected as a pack/range with regex: ${re}`);
+            break;
+        }
+    }
+
+    // --- Stage 3: Low-Confidence, Standalone Patterns (only if not a pack) ---
+    if (!isPack) {
+        if (episode === undefined) {
+            const standaloneEpisodeRegex = /\b[eE][pP]?[._\s-]*(\d{1,2})\b/i;
+            const match = regexSanitized.match(standaloneEpisodeRegex);
+            if (match) {
+                episode = parseInt(match[1], 10);
+                logger.debug(`[ROBUST-PARSER] Info: Found standalone episode=${episode}.`);
             }
         }
     }
     
+    // Find season if it's still missing
+    if (season === undefined) {
+        const seasonRegex = /\b(?:season|s|t)[\s._-]*(\d{1,2})\b/i;
+        const match = regexSanitized.match(seasonRegex);
+        if (match) {
+            season = parseInt(match[1], 10);
+            logger.debug(`[ROBUST-PARSER] Info: Found standalone season=${season}.`);
+        }
+    }
+
+    // Apply fallback season from parent torrent if we still don't have one.
     if (season === undefined && fallbackSeason !== null) {
         season = fallbackSeason;
     }

@@ -1,15 +1,13 @@
 import stringSimilarity from 'string-similarity';
 import { SIMILARITY_THRESHOLD, STRICT_LANGUAGE_FILTER, STREAM_LIMIT_PER_QUALITY } from '../config.js';
 import { getTorrentFiles } from './bitmagnet.js';
-// R8: Import new robust parser and remove PTT dependency from this file.
+// R12: Import PTT directly for diagnostics
+import PTT from 'parse-torrent-title';
 import { logger, QUALITY_ORDER, getQuality, sanitizeName, robustParseInfo } from './utils.js';
 
-// R8: This function is now redundant and has been removed. Its logic is inside robustParseInfo.
-// function fallbackParseSeasonPack(title) { ... }
 
 function getTitleSimilarity(tmdbTitle, torrentName) {
     if (!tmdbTitle) return 0;
-    // R8: Use robust parser to get the title.
     const parsed = robustParseInfo(torrentName);
     if (!parsed.title) return 0;
     return stringSimilarity.compareTwoStrings(tmdbTitle.toLowerCase(), parsed.title.toLowerCase());
@@ -27,11 +25,9 @@ export function getBestLanguage(torrentLanguages, preferredLanguages) {
 }
 
 export function findFileInTorrentInfo(torrentInfo, season, episode) {
-    // R8: Get fallback season from parent torrent.
     const { season: fallbackSeason } = robustParseInfo(torrentInfo.filename);
 
     for (const file of torrentInfo.files) {
-        // R8: Use robust parser for files, providing the fallback season.
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
         if (fileInfo.season === season && fileInfo.episode === episode) return file;
     }
@@ -56,6 +52,11 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
 
         logger.debug(`[MATCHER-SERIES] Evaluating torrent: "${torrentData.name}"`);
 
+        // R12: Add diagnostic logging to get raw PTT output
+        const sanitizedForDiag = sanitizeName(torrentData.name);
+        const pttDirectResult = PTT.parse(sanitizedForDiag);
+        logger.debug(`[DIAGNOSTIC-PTT] Raw PTT result for "${sanitizedForDiag}": ${JSON.stringify(pttDirectResult)}`);
+
         const titleSimilarity = getTitleSimilarity(tmdbShow.name, torrentData.name);
         logger.debug(`[MATCHER-SERIES] -> Similarity score: ${titleSimilarity.toFixed(2)} (Threshold: ${SIMILARITY_THRESHOLD})`);
 
@@ -66,7 +67,6 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         
         const bestLanguage = getBestLanguage(torrent.languages, preferredLanguages);
         
-        // R8: Use the robust parser for the main torrent title.
         const parsedInfo = robustParseInfo(torrentData.name);
         const { season: topSeason, episode: topEpisode } = parsedInfo;
         
@@ -95,7 +95,6 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
              for (const file of files) {
                  if (file.fileType !== 'video') continue;
                  
-                 // R8: Use robust parser, providing topSeason as a fallback.
                  const fileInfo = robustParseInfo(file.path, topSeason);
                  logger.debug(`[MATCHER-SERIES] -> Parsed file "${file.path}" => Season=${fileInfo.season}, Episode=${fileInfo.episode}`);
                  

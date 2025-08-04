@@ -9,6 +9,17 @@ function getAuthHeader(apiKey) {
     return { headers: { Authorization: `Bearer ${apiKey}` } };
 }
 
+// R30: Re-introduced the function to get the user's active torrent list. This is the only reliable way.
+export async function getTorrents(apiKey) {
+    try {
+        const response = await rd.get('/torrents', getAuthHeader(apiKey));
+        return response.data;
+    } catch (error) {
+        logger.error(`[RD] Error getting torrent list: ${error.response?.data?.error || error.message}`);
+        return []; // Return empty array on failure
+    }
+}
+
 export async function addMagnet(magnetLink, apiKey) {
     const formData = new URLSearchParams();
     formData.append('magnet', magnetLink);
@@ -59,11 +70,10 @@ export async function unrestrictLink(link, apiKey) {
 }
 
 export async function pollTorrentUntilReady(torrentId, apiKey) {
-    // Adjusted polling to time out around the 3-minute mark
     let attempts = 0;
-    const maxAttempts = 12; // 12 attempts
-    let delay = 5000; // Start with 5 seconds
-    const maxDelay = 20000; // Cap at 20 seconds
+    const maxAttempts = 12;
+    let delay = 5000;
+    const maxDelay = 20000;
 
     while (attempts < maxAttempts) {
         const torrentInfo = await getTorrentInfo(torrentId, apiKey);
@@ -82,7 +92,7 @@ export async function pollTorrentUntilReady(torrentId, apiKey) {
 
         logger.debug(`[RD] Polling for torrent ${torrentId}, status: ${torrentInfo.status}, attempt ${attempts + 1}/${maxAttempts}`);
         await sleep(delay);
-        delay = Math.min(delay * 1.5, maxDelay); // Exponential backoff
+        delay = Math.min(delay * 1.5, maxDelay);
         attempts++;
     }
 

@@ -73,7 +73,7 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
 
         if (topSeason === season && topEpisode === episode) {
             logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Direct match on torrent name.`);
-            streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+            streams.push({ infoHash: torrent.infohash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
             continue;
         }
 
@@ -83,43 +83,48 @@ export async function findBestSeriesStreams(tmdbShow, season, episode, newTorren
         }
 
         if (topSeason === season) {
-            logger.debug(`[MATCHER-SERIES] -> Torrent is a pack for the correct season. Checking file readiness...`);
+            logger.debug(`[MATCHER-SERIES] -> Torrent is a pack for the correct season. Checking file readiness and status...`);
             
-            // R29: The definitive "state-aware" check.
             if (!torrentData.hasFilesInfo) {
                 logger.warn(`[MATCHER-SERIES] -> REJECTED: Torrent pack '${torrentData.name}' has hasFilesInfo=false. Files are not indexed yet.`);
                 continue;
             }
 
-            logger.debug(`[MATCHER-SERIES] -> Files are indexed (hasFilesInfo=true). Diving into files...`);
-            const files = await getTorrentFiles(torrent.infoHash);
-            if (!files || files.length === 0) {
-                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no files according to the API.`);
-                continue;
-            }
+            // R30: This is the definitive, state-aware logic gate.
+            if (torrentData.filesStatus === 'single') {
+                logger.debug(`[MATCHER-SERIES] -> Torrent is 'single' file status. Treating as a single-file pack without a further API call.`);
+                // Since this is a single file that is a season pack, it's a valid stream for any episode in that season.
+                streams.push({ infoHash: torrent.infoHash, fileIndex: 0, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+            } else if (torrentData.filesStatus === 'multi') {
+                logger.debug(`[MATCHER-SERIES] -> Torrent is 'multi' file status. Diving into files...`);
+                const files = await getTorrentFiles(torrent.infoHash);
+                if (!files || files.length === 0) {
+                    logger.debug(`[MATCHER-SERIES] -> REJECTED: Multi-file pack contains no files according to the API.`);
+                    continue;
+                }
 
-            const videoFiles = files.filter(f => f.fileType === 'video');
-            if (videoFiles.length === 0) {
-                logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no video files.`);
-                continue;
-            }
+                const videoFiles = files.filter(f => f.fileType === 'video');
+                if (videoFiles.length === 0) {
+                    logger.debug(`[MATCHER-SERIES] -> REJECTED: Pack contains no video files.`);
+                    continue;
+                }
 
-            logger.debug(`[MATCHER-SERIES] -> Found ${videoFiles.length} video file(s) in pack. Searching for S${season}E${episode}.`);
+                logger.debug(`[MATCHER-SERIES] -> Found ${videoFiles.length} video file(s) in pack. Searching for S${season}E${episode}.`);
 
-            const matchingFile = videoFiles.find(file => {
-                logger.debug(`[MATCHER-SERIES] -> Checking file path: "${file.path}"`);
-                const fileInfo = robustParseInfo(file.path, topSeason);
-                return fileInfo.season === season && fileInfo.episode === episode;
-            });
+                const matchingFile = videoFiles.find(file => {
+                    logger.debug(`[MATCHER-SERIES] -> Checking file path: "${file.path}"`);
+                    const fileInfo = robustParseInfo(file.path, topSeason);
+                    return fileInfo.season === season && fileInfo.episode === episode;
+                });
 
-            if (matchingFile) {
-                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside pack: "${matchingFile.path}"`);
-                streams.push({ infoHash: torrent.infoHash, fileIndex: matchingFile.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
-            } else if (videoFiles.length === 1) {
-                logger.debug(`[MATCHER-SERIES] -> ACCEPTED: No specific episode match, but it's a single-file pack.`);
-                streams.push({ infoHash: torrent.infoHash, fileIndex: videoFiles[0].index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+                if (matchingFile) {
+                    logger.debug(`[MATCHER-SERIES] -> ACCEPTED: Found matching file inside pack: "${matchingFile.path}"`);
+                    streams.push({ infoHash: torrent.infoHash, fileIndex: matchingFile.index, torrentName: torrentData.name, seeders: torrent.seeders, language: bestLanguage, quality: getQuality(torrent.videoResolution), size: torrentData.size, isCached: false });
+                } else {
+                    logger.debug(`[MATCHER-SERIES] -> REJECTED: Multi-file pack did not contain the requested episode.`);
+                }
             } else {
-                logger.debug(`[MATCHER-SERIES] -> REJECTED: Multi-file pack did not contain the requested episode.`);
+                 logger.warn(`[MATCHER-SERIES] -> REJECTED: Unknown filesStatus '${torrentData.filesStatus}'.`);
             }
         }
     }

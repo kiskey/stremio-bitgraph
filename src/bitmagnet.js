@@ -25,7 +25,8 @@ query TorrentContentSearch($input: TorrentContentSearchQueryInput!) {
   }
 }`;
 
-// R28: This query is now fully schema-compliant, accepting the correct input type.
+// R29: This query is now 100% compliant with the provided GraphQL schema.
+// It correctly follows the nested structure `query { torrent { files(input: ...) } }`.
 const torrentFilesQuery = `
 query TorrentFiles($input: TorrentFilesQueryInput!) {
   torrent {
@@ -85,33 +86,25 @@ export async function searchTorrents(searchString, contentType = 'tv_show') {
     return items;
 }
 
-// R28: The function now sends the variables in the correct structure: { "input": { "infoHashes": [...] } }
+// R29: The function and its call are now fully schema-compliant, removing the need for complex workarounds.
+// The second argument `torrentDataFromSearch` is no longer needed as the query is now reliable.
 export async function getTorrentFiles(infoHash) {
     const data = await queryGraphQL(torrentFilesQuery, {
         input: {
             infoHashes: [infoHash],
-            limit: 1000
+            limit: 1000 // A reasonable limit for files in a pack
         }
     });
     
+    // According to the schema, the response will always be in `data.torrent.files.items`.
     const items = data?.torrent?.files?.items;
 
     if (!items) {
-        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items or an unexpected structure.`);
-        // This is a last-resort fallback based on observed API behavior, but the corrected query should prevent this.
-        const torrentData = data?.torrent?.[0]; // Support for older query structures just in case
-        if (torrentData && torrentData.name && torrentData.filesCount === 1) {
-             logger.info(`[BITMAGNET] No files array, but torrent appears to be a single file. Adapting.`);
-             return [{
-                 index: 0,
-                 path: torrentData.name,
-                 size: torrentData.size,
-                 fileType: 'video'
-             }];
-        }
+        logger.warn(`[BITMAGNET] File query for "${infoHash}" returned no items or an unexpected structure. This may indicate an actual empty torrent or an API issue.`);
         return [];
     }
 
+    // Now that the query is correct, we can trust the API's response directly.
     logger.debug(`[BITMAGNET] Successfully retrieved ${items.length} file(s) for infohash ${infoHash}.`);
     return items;
 }

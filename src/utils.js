@@ -42,7 +42,7 @@ export function sanitizeName(name) {
     return sanitized;
 }
 
-// R21: Enhanced range detection regex to handle plural 'episodes'.
+// R22: Final enhancement to range detection regex.
 export function robustParseInfo(title, fallbackSeason = null) {
     const sanitizedTitle = sanitizeName(title);
     const pttResult = PTT.parse(sanitizedTitle);
@@ -51,8 +51,9 @@ export function robustParseInfo(title, fallbackSeason = null) {
     
     logger.debug(`[ROBUST-PARSER] Initial PTT for "${sanitizedTitle}": season=${season}, episode=${episode}`);
 
-    // R21 FIX IS HERE: `episodes?` now matches both "episode" and "episodes".
-    const rangeRegex = /(episodes?|ep|e)[\s._-]*[\[(]?\s*\d{1,2}[\s._-]*?-[\s._-]*?\d{1,2}\s*[\])]?/i;
+    // R22 FIX IS HERE: The regex is now more flexible and looks for a word boundary `\b`
+    // to ensure it can find the range pattern anywhere in the string.
+    const rangeRegex = /\b(episodes?|ep|e)[\s._-]*[\[(]?\s*\d{1,2}[\s._-]*?-[\s._-]*?\d{1,2}\s*[\])]?/i;
     if (rangeRegex.test(sanitizedTitle)) {
         logger.debug(`[ROBUST-PARSER] Detected episode range in "${sanitizedTitle}". Forcing episode to undefined.`);
         episode = undefined;

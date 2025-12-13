@@ -17,6 +17,10 @@ export const TMDB_API_KEY = process.env.TMDB_API_KEY;
 export const BITMAGNET_GRAPHQL_ENDPOINT = process.env.BITMAGNET_GRAPHQL_ENDPOINT;
 export const DATABASE_URL = process.env.DATABASE_URL;
 
+// Optional Fallback API Keys (Tier 2)
+export const OMDB_API_KEY = process.env.OMDB_API_KEY; // Optional
+export const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID; // Optional
+
 // User Preferences
 const langs = process.env.PREFERRED_LANGUAGES;
 export const PREFERRED_LANGUAGES = langs ? langs.split(',').map(l => l.trim()) : [];

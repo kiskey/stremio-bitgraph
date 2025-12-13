@@ -48,7 +48,7 @@ async function queryGraphQL(query, variables) {
             headers: { 'Content-Type': 'application/json' }
         });
 
-        logger.debug(`[BITMAGNET] Raw GraphQL response received: ${JSON.stringify(response.data, null, 2)}`);
+        // logger.debug(`[BITMAGNET] Raw GraphQL response received: ${JSON.stringify(response.data, null, 2)}`);
 
         if (response.data.errors) {
             throw new Error(response.data.errors.map(e => e.message).join(', '));
@@ -65,12 +65,23 @@ async function queryGraphQL(query, variables) {
     }
 }
 
-export async function searchTorrents(searchString, contentType = 'tv_show') {
-    logger.debug(`[BITMAGNET] Searching for contentType: "${contentType}"`);
+/**
+ * Searches Bitmagnet for torrents.
+ * @param {string} searchString - The query string.
+ * @param {string} contentType - 'tv_show' or 'movie'.
+ * @param {number} limit - Max results to return (default 100).
+ */
+export async function searchTorrents(searchString, contentType = 'tv_show', limit = 100) {
+    logger.debug(`[BITMAGNET] Searching for: "${searchString}" (Type: ${contentType}, Limit: ${limit})`);
+    
+    // Clean up search string to avoid GraphQL syntax errors if special chars exist
+    // Removing quotes and backslashes is usually enough to prevent JSON injection/syntax issues
+    const cleanQuery = searchString.replace(/["\\]/g, ''); 
+
     const data = await queryGraphQL(torrentContentSearchQuery, {
         input: {
-            queryString: searchString,
-            limit: 100,
+            queryString: cleanQuery,
+            limit: limit,
             orderBy: [
                 { field: 'published_at', descending: true },
                 { field: 'seeders', descending: true }
@@ -86,7 +97,6 @@ export async function searchTorrents(searchString, contentType = 'tv_show') {
     return items;
 }
 
-// This function is now schema-compliant and correct. No changes needed.
 export async function getTorrentFiles(infoHash) {
     const data = await queryGraphQL(torrentFilesQuery, {
         input: {

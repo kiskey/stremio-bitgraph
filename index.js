@@ -226,12 +226,14 @@ async function startAddonServer() {
             // Match the results locally
             let { streams: resultStreams, cachedStreams } = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), refinedTorrents, rows, PREFERRED_LANGUAGES);
             
-            logger.info(`[ADDON] Targeted search yielded ${resultStreams.length} valid streams.`);
+            logger.info(`[ADDON] Targeted search yielded ${refinedTorrents.length} raw hits and ${resultStreams.length} valid streams.`);
 
-            // --- STEP 2: FALLBACK BROAD SEARCH (If targeted failed) ---
-            // UPDATED in v3.1: Increased threshold to 5.
-            if (resultStreams.length < 5) {
-                logger.info(`[ADDON] Low results (< 5) from targeted search. Falling back to BROAD search for "${meta.name}"...`);
+            // --- STEP 2: FALLBACK BROAD SEARCH ---
+            // V3.2: Use raw hit count to determine if search was "healthy".
+            // If we found 10+ raw "S01" torrents, we trust the search query even if matcher only kept 1.
+            // We only fallback if raw results were low OR if we found literally 0 playable streams.
+            if (refinedTorrents.length < 10 || resultStreams.length === 0) {
+                logger.info(`[ADDON] Search potentially weak (Raw: ${refinedTorrents.length}, Final: ${resultStreams.length}). Falling back to BROAD search for "${meta.name}"...`);
                 
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), broadTorrents, rows, PREFERRED_LANGUAGES);
@@ -239,7 +241,6 @@ async function startAddonServer() {
                 // Merge Broad results into Targeted results (deduplicating by infoHash)
                 const existingHashes = new Set(resultStreams.map(s => s.infoHash));
                 
-                // Add broad streams if they aren't already in the list
                 for (const stream of broadResult.streams) {
                     if (!existingHashes.has(stream.infoHash)) {
                         resultStreams.push(stream);
@@ -247,7 +248,6 @@ async function startAddonServer() {
                     }
                 }
                 
-                // Merge cached streams
                 const existingCachedHashes = new Set(cachedStreams.map(s => s.infoHash));
                 for (const stream of broadResult.cachedStreams) {
                     if (!existingCachedHashes.has(stream.infoHash)) {

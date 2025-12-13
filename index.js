@@ -7,7 +7,6 @@ import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
 import { logger, getQuality, formatSize, robustParseInfo } from './src/utils.js';
-// UPDATED: Replaced src/tmdb.js with src/metadata.js
 import { getMetaDetails } from './src/metadata.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
@@ -128,41 +127,23 @@ async function startApiServer() {
 // R30: Rewritten to be robust against index mismatches.
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
-
-    // Step 1: Filter the file list to only include files selected for download.
-    // This ensures our indices will match the `links` array.
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
     logger.debug(`[API-PLAYER] Original file count: ${readyTorrent.files.length}. Selected file count: ${selectedFiles.length}. Links count: ${readyTorrent.links.length}.`);
 
-    // Step 2: Search for the target episode ONLY within the selected files.
     const targetFileIndexInSelected = selectedFiles.findIndex(file => {
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
-        logger.debug(`[API-PLAYER] Checking selected file "${file.path}": Parsed S=${fileInfo.season}, E=${fileInfo.episode}. Target: S${season}E${episode}`);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
 
-    // Step 3 (Fallback): If no specific episode is found, check if it's a single-file pack.
-    if (targetFileIndexInSelected === -1 && selectedFiles.length === 1) {
+    let finalIndex = targetFileIndexInSelected;
+    // Fallback for single-file packs
+    if (finalIndex === -1 && selectedFiles.length === 1) {
         logger.info(`[API-PLAYER] No specific episode found, but it's a single selected file. Assuming it's the correct one.`);
-        // The index will be 0 because it's the only item in the `selectedFiles` array.
         const singleFile = selectedFiles[0];
         const fileInfo = robustParseInfo(singleFile.path, fallbackSeason);
-        // We accept it as long as the season matches (or if we can't determine the season from the file)
         if (fileInfo.season === parseInt(season, 10) || fileInfo.season === undefined) {
-             // Since we found it in the selected list at index 0, we can proceed with index 0.
-             // We need to set the variable or return differently. 
-             // In this flow, we will just set targetFileIndexInSelected manually, but since it's const, we need to handle it.
-             // Correction: Since I cannot reassign const, and the logic was "return 0" in V1, I will replicate the behavior by logic branch.
-        }
-    }
-
-    let finalIndex = targetFileIndexInSelected;
-    if (finalIndex === -1 && selectedFiles.length === 1) {
-         const singleFile = selectedFiles[0];
-         const fileInfo = robustParseInfo(singleFile.path, fallbackSeason);
-         if (fileInfo.season === parseInt(season, 10) || fileInfo.season === undefined) {
              finalIndex = 0;
-         }
+        }
     }
 
     if (finalIndex === -1) {
@@ -171,10 +152,9 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
 
     logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${finalIndex} of the selected files.`);
     
-    // The index from our filtered list now correctly corresponds to the links array.
     const linkToUnrestrict = readyTorrent.links[finalIndex];
     if (!linkToUnrestrict) {
-        throw new Error(`Could not find a corresponding link at verified index ${finalIndex}. This indicates a mismatch between RD's files and links arrays.`);
+        throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
     }
 
     const unrestricted = await rd.unrestrictLink(linkToUnrestrict, REALDEBRID_API_KEY);
@@ -191,7 +171,6 @@ async function playFromReadyMovieTorrent(res, readyTorrent) {
     if (!unrestricted) throw new Error('Failed to unrestrict movie link.');
     res.redirect(unrestricted.download);
 }
-
 
 async function startAddonServer() {
     await initDb();
@@ -217,51 +196,87 @@ async function startAddonServer() {
         };
 
         let imdbId, season, episode;
-
         if (type === 'series') {
             [imdbId, season, episode] = id.split(':');
         } else {
             imdbId = id;
         }
 
-        // --- UPDATED METADATA LOGIC START ---
-        // Fetch unified metadata
         const meta = await getMetaDetails(imdbId, type);
         
         if (!meta) {
-            // Logger error is handled inside getMetaDetails but good to log here too
             return { streams: [] };
         }
-        // --- UPDATED METADATA LOGIC END ---
 
         const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND rd_torrent_info_json IS NOT NULL", [imdbId, type]);
 
-        // Use the normalized 'name' for the search string
-        const searchString = meta.name;
-        const newTorrents = await searchTorrents(searchString, type === 'series' ? 'tv_show' : 'movie');
+        // --- MATCHING LOGIC ---
         
         if (type === 'series') {
-            // Matcher expects { name: "Title" } for series
-            // Our meta object has { name: "Title", ... } so it works directly
-            const { streams, cachedStreams } = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), newTorrents, rows, PREFERRED_LANGUAGES);
-            const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
+            const sVal = parseInt(season, 10);
+            const sPadded = sVal < 10 ? `S0${sVal}` : `S${sVal}`;
             
+            // --- STEP 1: TARGETED SEARCH (Refined First) ---
+            // We optimize for the standard "S01" format found in >90% of scene releases.
+            const refinedQuery = `${meta.name} ${sPadded}`;
+            logger.info(`[ADDON] Attempting TARGETED search for: "${refinedQuery}"`);
+            
+            // We use a smaller limit (50) for the targeted search to save resources, 
+            // as we expect the correct result to be near the top.
+            const refinedTorrents = await searchTorrents(refinedQuery, 'tv_show', 50);
+            
+            // Match the results locally
+            let { streams: resultStreams, cachedStreams } = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), refinedTorrents, rows, PREFERRED_LANGUAGES);
+            
+            logger.info(`[ADDON] Targeted search yielded ${resultStreams.length} valid streams.`);
+
+            // --- STEP 2: FALLBACK BROAD SEARCH (If targeted failed) ---
+            // If we have fewer than 2 valid streams, we assume the targeted search was too strict 
+            // (e.g. it missed "Season 1" or "Complete" packs that didn't match "S01").
+            if (resultStreams.length < 2) {
+                logger.info(`[ADDON] Low results from targeted search. Falling back to BROAD search for "${meta.name}"...`);
+                
+                const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
+                const broadResult = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), broadTorrents, rows, PREFERRED_LANGUAGES);
+                
+                // Merge Broad results into Targeted results (deduplicating by infoHash)
+                const existingHashes = new Set(resultStreams.map(s => s.infoHash));
+                
+                // Add broad streams if they aren't already in the list
+                for (const stream of broadResult.streams) {
+                    if (!existingHashes.has(stream.infoHash)) {
+                        resultStreams.push(stream);
+                        existingHashes.add(stream.infoHash);
+                    }
+                }
+                
+                // Merge cached streams
+                const existingCachedHashes = new Set(cachedStreams.map(s => s.infoHash));
+                for (const stream of broadResult.cachedStreams) {
+                    if (!existingCachedHashes.has(stream.infoHash)) {
+                        cachedStreams.push(stream);
+                        existingCachedHashes.add(stream.infoHash);
+                    }
+                }
+                
+                logger.info(`[ADDON] Broad search merged. Total streams now: ${resultStreams.length}`);
+            }
+
+            const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
             logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for series ${id}`);
             return { streams: mapToStreamObjects(sortedStreams) };
-        }
+        } 
 
         if (type === 'movie') {
-            // Matcher expects { title: "Title", release_date: "YYYY-MM-DD" } for movies
-            // Our meta object has { name: "Title", year: "YYYY" }
-            // We create an adapter object here to avoid changing the matcher logic
-            const movieMetaForMatcher = {
-                title: meta.name,
-                release_date: meta.year ? `${meta.year}-01-01` : null
-            };
-
-            const { streams, cachedStreams } = await matcher.findBestMovieStreams(movieMetaForMatcher, newTorrents, rows, PREFERRED_LANGUAGES);
+            // --- MOVIES (Broad Search Only) ---
+            // Movies generally don't have "Seasons", so the refined logic isn't as critical.
+            logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
+            const broadTorrents = await searchTorrents(meta.name, 'movie', 100);
+            
+            const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
+            const { streams, cachedStreams } = await matcher.findBestMovieStreams(movieMetaForMatcher, broadTorrents, rows, PREFERRED_LANGUAGES);
+            
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
-
             logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for movie ${id}`);
             return { streams: mapToStreamObjects(sortedStreams) };
         }

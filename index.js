@@ -152,6 +152,7 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
 
     logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${finalIndex} of the selected files.`);
     
+    // The index from our filtered list now correctly corresponds to the links array.
     const linkToUnrestrict = readyTorrent.links[finalIndex];
     if (!linkToUnrestrict) {
         throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
@@ -217,12 +218,9 @@ async function startAddonServer() {
             const sPadded = sVal < 10 ? `S0${sVal}` : `S${sVal}`;
             
             // --- STEP 1: TARGETED SEARCH (Refined First) ---
-            // We optimize for the standard "S01" format found in >90% of scene releases.
             const refinedQuery = `${meta.name} ${sPadded}`;
             logger.info(`[ADDON] Attempting TARGETED search for: "${refinedQuery}"`);
             
-            // We use a smaller limit (50) for the targeted search to save resources, 
-            // as we expect the correct result to be near the top.
             const refinedTorrents = await searchTorrents(refinedQuery, 'tv_show', 50);
             
             // Match the results locally
@@ -231,10 +229,9 @@ async function startAddonServer() {
             logger.info(`[ADDON] Targeted search yielded ${resultStreams.length} valid streams.`);
 
             // --- STEP 2: FALLBACK BROAD SEARCH (If targeted failed) ---
-            // If we have fewer than 2 valid streams, we assume the targeted search was too strict 
-            // (e.g. it missed "Season 1" or "Complete" packs that didn't match "S01").
-            if (resultStreams.length < 2) {
-                logger.info(`[ADDON] Low results from targeted search. Falling back to BROAD search for "${meta.name}"...`);
+            // UPDATED in v3.1: Increased threshold to 5.
+            if (resultStreams.length < 5) {
+                logger.info(`[ADDON] Low results (< 5) from targeted search. Falling back to BROAD search for "${meta.name}"...`);
                 
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), broadTorrents, rows, PREFERRED_LANGUAGES);
@@ -269,7 +266,6 @@ async function startAddonServer() {
 
         if (type === 'movie') {
             // --- MOVIES (Broad Search Only) ---
-            // Movies generally don't have "Seasons", so the refined logic isn't as critical.
             logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
             const broadTorrents = await searchTorrents(meta.name, 'movie', 100);
             

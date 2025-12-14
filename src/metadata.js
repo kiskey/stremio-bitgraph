@@ -50,9 +50,15 @@ async function fetchCinemeta(imdbId, type) {
         const meta = response.data?.meta;
         if (!meta) throw new Error('Not found');
         
+        // V6.1 Tweak: Robust Year Extraction
+        // Checks 'year' OR 'releaseInfo', then uses regex to find the first 4-digit number.
+        // Handles "2025–", "2023", "2010-2014", etc.
+        const yearStr = meta.year || meta.releaseInfo || '';
+        const extractedYear = yearStr.match(/\d{4}/)?.[0] || null;
+
         return {
             name: meta.name,
-            year: meta.year ? meta.year.split('–')[0] : null, // Handles "2011–2019" format
+            year: extractedYear,
             source: 'Cinemeta'
         };
     } catch (e) {
@@ -107,13 +113,11 @@ export async function getMetaDetails(imdbId, type) {
     logger.info(`[METADATA] resolving metadata for ${imdbId} (${type})...`);
 
     // TIER 1: Parallel Execution (TMDB + Cinemeta)
-    // V6 Change: We attach a .catch() to cinemetaPromise immediately.
-    // This prevents "Unhandled Promise Rejection" crashes if TMDB succeeds 
-    // but Cinemeta fails in the background later (e.g. DNS timeout).
+    // V6 Fix: Attach .catch() immediately to silence unhandled background rejections
     const tmdbPromise = fetchTmdb(imdbId, type);
     const cinemetaPromise = fetchCinemeta(imdbId, type).catch(err => {
         logger.debug(`[METADATA] Background Cinemeta lookup failed/ignored: ${err.message}`);
-        return null; // Return null on failure so we can check it safely
+        return null; 
     });
 
     let result = null;
@@ -126,8 +130,6 @@ export async function getMetaDetails(imdbId, type) {
         logger.warn(`[METADATA] TMDB failed for ${imdbId}. Falling back to Cinemeta... Error: ${tmdbError.message}`);
         try {
             // Fallback to Cinemeta
-            // Since we handled the error in the definition, this await will NOT throw.
-            // It will return either the result object OR null.
             result = await cinemetaPromise;
             
             if (result) {
@@ -136,14 +138,11 @@ export async function getMetaDetails(imdbId, type) {
                 logger.warn(`[METADATA] Cinemeta also failed (returned null).`);
             }
         } catch (cinemetaError) {
-            // This block is technically unreachable now due to the catch above, 
-            // but kept for safety structure.
             logger.warn(`[METADATA] Cinemeta fallback error: ${cinemetaError.message}`);
         }
     }
 
     // TIER 2: Parallel Execution (OMDb + Trakt) - Last Resort
-    // Executed only if Tier 1 failed entirely.
     if (!result && (omdb || trakt)) {
         logger.info(`[METADATA] Tier 1 failed. Attempting Tier 2 (OMDb/Trakt)...`);
         
@@ -152,8 +151,6 @@ export async function getMetaDetails(imdbId, type) {
         if (trakt) tier2Promises.push(fetchTrakt(imdbId, type));
 
         try {
-            // Promise.any returns the first fulfilled promise and handles rejections 
-            // via AggregateError, so it is safe from crashing the process.
             result = await Promise.any(tier2Promises);
             logger.info(`[METADATA] Resolved via Tier 2 (${result.source}): "${result.name}"`);
         } catch (aggregateError) {

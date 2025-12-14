@@ -57,7 +57,7 @@ async function startApiServer() {
 
             if (!torrentInfo) {
                 const processPromise = new Promise(async (resolve, reject) => {
-                    let torrentId = null; // Track ID for cleanup
+                    let torrentId = null; 
                     try {
                         logger.info(`[API] No cache hit for ${infoHash}. Starting new RD process.`);
                         
@@ -65,51 +65,54 @@ async function startApiServer() {
                         const existingTorrent = activeTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
                         
                         if (existingTorrent) {
-                            logger.info(`[API] Torrent with hash ${infoHash} already exists on Real-Debrid (ID: ${existingTorrent.id}). Re-using it.`);
-                            torrentId = existingTorrent.id;
-                        } else {
-                            logger.info(`[API] Torrent with hash ${infoHash} not found on Real-Debrid. Adding it now.`);
+                            // --- V5: Smart Reuse Check ---
+                            // If the existing torrent is dead or has an error, we must not reuse it.
+                            // We delete it immediately and treat this as a "fresh add" scenario.
+                            if (['magnet_error', 'error', 'dead', 'virus'].includes(existingTorrent.status)) {
+                                logger.warn(`[API] Found existing torrent ${existingTorrent.id} but status is '${existingTorrent.status}'. Deleting and re-adding.`);
+                                await rd.deleteTorrent(existingTorrent.id, REALDEBRID_API_KEY);
+                                torrentId = null; // Force new add
+                            } else {
+                                logger.info(`[API] Re-using active torrent ${existingTorrent.id} (Status: ${existingTorrent.status}).`);
+                                torrentId = existingTorrent.id;
+                            }
+                        } 
+                        
+                        // If we didn't find a reusable ID (or we just deleted a bad one), add it now.
+                        if (!torrentId) {
+                            logger.info(`[API] Torrent not found or invalid on Real-Debrid. Adding it now.`);
                             const magnet = `magnet:?xt=urn:btih:${infoHash}`;
                             const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
                             if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
                             torrentId = addResult.id;
 
-                            // --- V4 PRE-SELECTION SAFETY LOOP ---
-                            // We must wait for RD to resolve the magnet metadata before selecting files.
-                            // If we select too early -> 'parameter_missing'.
-                            // If the magnet is broken -> 'magnet_error'.
-                            
+                            // --- V4/V5: Pre-Selection Safety Loop ---
                             logger.info(`[API] Torrent added (ID: ${torrentId}). Waiting for metadata...`);
                             
                             let readyForSelection = false;
-                            const maxPreChecks = 10; // 20 seconds total
-                            
+                            const maxPreChecks = 10;
                             for (let i = 0; i < maxPreChecks; i++) {
-                                await sleep(2000); // 2s cool-down
+                                await sleep(2000);
                                 const info = await rd.getTorrentInfo(torrentId, REALDEBRID_API_KEY);
                                 
-                                if (!info) continue; // Transient network error? retry.
-
-                                if (info.status === 'magnet_error') {
-                                    throw new Error('Real-Debrid rejected the magnet (magnet_error).');
+                                if (!info) continue;
+                                if (['magnet_error', 'error', 'virus'].includes(info.status)) {
+                                    throw new Error(`Real-Debrid rejected the magnet (${info.status}).`);
                                 }
                                 if (info.status === 'waiting_files_selection') {
                                     readyForSelection = true;
                                     break;
                                 }
                                 if (info.status === 'downloading' || info.status === 'downloaded') {
-                                    logger.info(`[API] Torrent ${torrentId} is already processing/done (Status: ${info.status}). Skipping selection.`);
                                     readyForSelection = true;
                                     break;
                                 }
-                                // If 'magnet_conversion', we loop again.
                             }
 
                             if (!readyForSelection) {
                                 throw new Error('Timed out waiting for Real-Debrid to convert magnet metadata.');
                             }
 
-                            // Only select files if we are in the correct state
                             const freshInfo = await rd.getTorrentInfo(torrentId, REALDEBRID_API_KEY);
                             if (freshInfo && freshInfo.status === 'waiting_files_selection') {
                                 await rd.selectFiles(torrentId, 'all', REALDEBRID_API_KEY);
@@ -129,11 +132,30 @@ async function startApiServer() {
                         
                         resolve(readyTorrent);
                     } catch (error) {
-                        // --- V4 CLEANUP LOGIC ---
+                        // --- V5: Conditional Blocking Cleanup ---
+                        // 1. Identify if the error is terminal (broken link) or transient (timeout/slow).
+                        const errMsg = error.message || '';
+                        const isTerminal = errMsg.includes('magnet_error') || 
+                                           errMsg.includes('virus') || 
+                                           errMsg.includes('error') || 
+                                           errMsg.includes('rejected');
+                        
+                        // We assume "Timed out" or "polling timed out" means slow download, not broken link.
+                        const isTimeout = errMsg.includes('timed out');
+
                         if (torrentId) {
-                            logger.warn(`[API] Process failed for ${torrentId}. Cleaning up trash from Real-Debrid...`);
-                            // Delete the failed torrent so it doesn't clutter the account
-                            setTimeout(() => rd.deleteTorrent(torrentId, REALDEBRID_API_KEY), 1000);
+                            if (isTerminal) {
+                                logger.warn(`[API] Terminal failure for ${torrentId} (${errMsg}). Deleting trash from Real-Debrid...`);
+                                // V5 Fix: Await the delete so the lock isn't released until cleanup is done.
+                                await rd.deleteTorrent(torrentId, REALDEBRID_API_KEY);
+                            } else if (isTimeout) {
+                                logger.info(`[API] Timeout for ${torrentId} (likely downloading slow). Keeping torrent in RD for retry.`);
+                            } else {
+                                // For unknown errors, we default to cleaning up to be safe, but you can adjust.
+                                // In V5, we'll treat unknown errors as cleanup candidates to avoid zombie states.
+                                logger.warn(`[API] Unknown error for ${torrentId} (${errMsg}). Cleaning up...`);
+                                await rd.deleteTorrent(torrentId, REALDEBRID_API_KEY);
+                            }
                         }
                         reject(error);
                     }
@@ -148,6 +170,9 @@ async function startApiServer() {
                 } catch (error) {
                     logger.error(`[API] Caching failure for ${infoHash}: ${error.message}`);
                     processingLock.set(infoHash, { state: 'FAILED', error: error });
+                    
+                    // V5 Fix: Do NOT delete the lock immediately in the outer catch.
+                    // We let this timeout handle it. This prevents the "Infinite Loop" race condition.
                     setTimeout(() => processingLock.delete(infoHash), 300000);
                     throw error;
                 }
@@ -161,7 +186,8 @@ async function startApiServer() {
 
         } catch (error) {
             logger.error(`[API] Final error processing ${infoHash}: ${error.message}`);
-            processingLock.delete(infoHash);
+            // V5 Fix: Removed 'processingLock.delete(infoHash)' here.
+            // The lock lifecycle is now strictly managed by the setTimeout in the try/catch block above.
             res.status(500).send(`Error: ${error.message}. Please try another stream.`);
         }
     });
@@ -169,6 +195,7 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
+// R30: Rewritten to be robust against index mismatches.
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
@@ -196,6 +223,7 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
 
     logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${finalIndex} of the selected files.`);
     
+    // The index from our filtered list now correctly corresponds to the links array.
     const linkToUnrestrict = readyTorrent.links[finalIndex];
     if (!linkToUnrestrict) {
         throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);

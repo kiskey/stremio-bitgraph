@@ -6,7 +6,7 @@ const { addonBuilder, serveHTTP } = sdk;
 import { manifest } from './manifest.js';
 import { PORT, API_PORT, APP_HOST, ADDON_ID, REALDEBRID_API_KEY, PREFERRED_LANGUAGES } from './config.js';
 import { initDb, pool } from './db.js';
-import { logger, getQuality, formatSize, robustParseInfo } from './src/utils.js';
+import { logger, getQuality, formatSize, robustParseInfo, sleep } from './src/utils.js';
 import { getMetaDetails } from './src/metadata.js';
 import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
@@ -57,14 +57,13 @@ async function startApiServer() {
 
             if (!torrentInfo) {
                 const processPromise = new Promise(async (resolve, reject) => {
+                    let torrentId = null; // Track ID for cleanup
                     try {
                         logger.info(`[API] No cache hit for ${infoHash}. Starting new RD process.`);
                         
                         const activeTorrents = await rd.getTorrents(REALDEBRID_API_KEY);
                         const existingTorrent = activeTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
                         
-                        let torrentId;
-
                         if (existingTorrent) {
                             logger.info(`[API] Torrent with hash ${infoHash} already exists on Real-Debrid (ID: ${existingTorrent.id}). Re-using it.`);
                             torrentId = existingTorrent.id;
@@ -74,7 +73,47 @@ async function startApiServer() {
                             const addResult = await rd.addMagnet(magnet, REALDEBRID_API_KEY);
                             if (!addResult) throw new Error('Failed to add magnet to Real-Debrid.');
                             torrentId = addResult.id;
-                            await rd.selectFiles(torrentId, 'all', REALDEBRID_API_KEY);
+
+                            // --- V4 PRE-SELECTION SAFETY LOOP ---
+                            // We must wait for RD to resolve the magnet metadata before selecting files.
+                            // If we select too early -> 'parameter_missing'.
+                            // If the magnet is broken -> 'magnet_error'.
+                            
+                            logger.info(`[API] Torrent added (ID: ${torrentId}). Waiting for metadata...`);
+                            
+                            let readyForSelection = false;
+                            const maxPreChecks = 10; // 20 seconds total
+                            
+                            for (let i = 0; i < maxPreChecks; i++) {
+                                await sleep(2000); // 2s cool-down
+                                const info = await rd.getTorrentInfo(torrentId, REALDEBRID_API_KEY);
+                                
+                                if (!info) continue; // Transient network error? retry.
+
+                                if (info.status === 'magnet_error') {
+                                    throw new Error('Real-Debrid rejected the magnet (magnet_error).');
+                                }
+                                if (info.status === 'waiting_files_selection') {
+                                    readyForSelection = true;
+                                    break;
+                                }
+                                if (info.status === 'downloading' || info.status === 'downloaded') {
+                                    logger.info(`[API] Torrent ${torrentId} is already processing/done (Status: ${info.status}). Skipping selection.`);
+                                    readyForSelection = true;
+                                    break;
+                                }
+                                // If 'magnet_conversion', we loop again.
+                            }
+
+                            if (!readyForSelection) {
+                                throw new Error('Timed out waiting for Real-Debrid to convert magnet metadata.');
+                            }
+
+                            // Only select files if we are in the correct state
+                            const freshInfo = await rd.getTorrentInfo(torrentId, REALDEBRID_API_KEY);
+                            if (freshInfo && freshInfo.status === 'waiting_files_selection') {
+                                await rd.selectFiles(torrentId, 'all', REALDEBRID_API_KEY);
+                            }
                         }
 
                         const readyTorrent = await rd.pollTorrentUntilReady(torrentId, REALDEBRID_API_KEY);
@@ -90,6 +129,12 @@ async function startApiServer() {
                         
                         resolve(readyTorrent);
                     } catch (error) {
+                        // --- V4 CLEANUP LOGIC ---
+                        if (torrentId) {
+                            logger.warn(`[API] Process failed for ${torrentId}. Cleaning up trash from Real-Debrid...`);
+                            // Delete the failed torrent so it doesn't clutter the account
+                            setTimeout(() => rd.deleteTorrent(torrentId, REALDEBRID_API_KEY), 1000);
+                        }
                         reject(error);
                     }
                 });
@@ -124,7 +169,6 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
-// R30: Rewritten to be robust against index mismatches.
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
@@ -152,7 +196,6 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
 
     logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${finalIndex} of the selected files.`);
     
-    // The index from our filtered list now correctly corresponds to the links array.
     const linkToUnrestrict = readyTorrent.links[finalIndex];
     if (!linkToUnrestrict) {
         throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
@@ -211,34 +254,30 @@ async function startAddonServer() {
 
         const { rows } = await pool.query("SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND rd_torrent_info_json IS NOT NULL", [imdbId, type]);
 
-        // --- MATCHING LOGIC ---
+        // --- MATCHING LOGIC (V3.2 Intelligence) ---
         
         if (type === 'series') {
             const sVal = parseInt(season, 10);
             const sPadded = sVal < 10 ? `S0${sVal}` : `S${sVal}`;
             
-            // --- STEP 1: TARGETED SEARCH (Refined First) ---
+            // Step 1: Targeted Search
             const refinedQuery = `${meta.name} ${sPadded}`;
             logger.info(`[ADDON] Attempting TARGETED search for: "${refinedQuery}"`);
             
             const refinedTorrents = await searchTorrents(refinedQuery, 'tv_show', 50);
             
-            // Match the results locally
             let { streams: resultStreams, cachedStreams } = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), refinedTorrents, rows, PREFERRED_LANGUAGES);
             
             logger.info(`[ADDON] Targeted search yielded ${refinedTorrents.length} raw hits and ${resultStreams.length} valid streams.`);
 
-            // --- STEP 2: FALLBACK BROAD SEARCH ---
-            // V3.2: Use raw hit count to determine if search was "healthy".
-            // If we found 10+ raw "S01" torrents, we trust the search query even if matcher only kept 1.
-            // We only fallback if raw results were low OR if we found literally 0 playable streams.
+            // Step 2: Fallback (Broad Search)
+            // Condition: Low raw hits (< 10) OR Zero valid streams
             if (refinedTorrents.length < 10 || resultStreams.length === 0) {
                 logger.info(`[ADDON] Search potentially weak (Raw: ${refinedTorrents.length}, Final: ${resultStreams.length}). Falling back to BROAD search for "${meta.name}"...`);
                 
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(meta, parseInt(season), parseInt(episode), broadTorrents, rows, PREFERRED_LANGUAGES);
                 
-                // Merge Broad results into Targeted results (deduplicating by infoHash)
                 const existingHashes = new Set(resultStreams.map(s => s.infoHash));
                 
                 for (const stream of broadResult.streams) {
@@ -265,7 +304,6 @@ async function startAddonServer() {
         } 
 
         if (type === 'movie') {
-            // --- MOVIES (Broad Search Only) ---
             logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
             const broadTorrents = await searchTorrents(meta.name, 'movie', 100);
             

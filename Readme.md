@@ -1,4 +1,4 @@
-# Stremio Bitmagnet & Real-Debrid Addon
+# Stremio Bitgraph & Real-Debrid Addon
 
 A high-performance, self-hosted Stremio addon that bridges your private **Bitmagnet** indexer with **Real-Debrid** to stream Movies and TV Shows instantly.
 

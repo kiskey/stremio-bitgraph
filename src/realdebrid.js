@@ -9,14 +9,13 @@ function getAuthHeader(apiKey) {
     return { headers: { Authorization: `Bearer ${apiKey}` } };
 }
 
-// R30: Re-introduced the function to get the user's active torrent list. This is the only reliable way.
 export async function getTorrents(apiKey) {
     try {
         const response = await rd.get('/torrents', getAuthHeader(apiKey));
         return response.data;
     } catch (error) {
         logger.error(`[RD] Error getting torrent list: ${error.response?.data?.error || error.message}`);
-        return []; // Return empty array on failure
+        return [];
     }
 }
 
@@ -45,7 +44,7 @@ export async function getTorrentInfo(torrentId, apiKey) {
 
 export async function selectFiles(torrentId, fileIds, apiKey) {
     const formData = new URLSearchParams();
-    formData.append('files', fileIds); // Can be 'all' or comma-separated IDs
+    formData.append('files', fileIds);
 
     try {
         await rd.post(`/torrents/selectFiles/${torrentId}`, formData, getAuthHeader(apiKey));
@@ -66,6 +65,18 @@ export async function unrestrictLink(link, apiKey) {
     } catch (error) {
         logger.error(`[RD] Error unrestricting link: ${error.response?.data?.error || error.message}`);
         return null;
+    }
+}
+
+// NEW: Delete function for cleanup
+export async function deleteTorrent(torrentId, apiKey) {
+    try {
+        await rd.delete(`/torrents/delete/${torrentId}`, getAuthHeader(apiKey));
+        logger.info(`[RD] Deleted torrent ${torrentId} from account.`);
+        return true;
+    } catch (error) {
+        logger.error(`[RD] Error deleting torrent ${torrentId}: ${error.response?.data?.error || error.message}`);
+        return false;
     }
 }
 

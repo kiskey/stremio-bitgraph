@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.5 – Enhanced logging for TorBox integration, fixed P2P fileIdx, 451 handling
+// Version: 2.7 – Direct file ID resolution, no links array, robust P2P fallback
 
 import express from 'express';
 import cors from 'cors';
@@ -146,7 +146,6 @@ async function startApiServer() {
                                            errMsg.includes('virus') ||
                                            errMsg.includes('rejected') ||
                                            statusCode === 451;
-
                         const isTimeout = errMsg.includes('timed out');
 
                         if (torrentId) {
@@ -185,7 +184,6 @@ async function startApiServer() {
                     await playFromReadyMovieTorrent(res, torrentInfo);
                 }
             } else {
-                // No debrid provider or no info found -> should never happen for P2P because they don't hit this server
                 res.status(404).send('Torrent not available via debrid.');
             }
         } catch (error) {
@@ -197,41 +195,52 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
-// ================== PLAYER HELPERS ==================
+// ================== PLAYER HELPERS (DIRECT FILE ID – NO LINKS ARRAY) ==================
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
-    const targetFileIndexInSelected = selectedFiles.findIndex(file => {
+
+    const targetFile = selectedFiles.find(file => {
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
     });
 
-    let finalIndex = targetFileIndexInSelected;
-    if (finalIndex === -1 && selectedFiles.length === 1) {
-        const fileInfo = robustParseInfo(selectedFiles[0].path, fallbackSeason);
-        if (fileInfo.season === parseInt(season, 10) || fileInfo.season === undefined) {
-            finalIndex = 0;
-        }
+    let fileToPlay = targetFile;
+    if (!fileToPlay && selectedFiles.length === 1) {
+        logger.info(`[API-PLAYER] No exact episode match, but single selected file. Using it.`);
+        fileToPlay = selectedFiles[0];
     }
 
-    if (finalIndex === -1) {
+    if (!fileToPlay) {
         throw new Error(`Could not find S${season}E${episode} in the torrent's selected file list.`);
     }
 
-    const linkToUnrestrict = readyTorrent.links[finalIndex];
-    if (!linkToUnrestrict) throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
-
-    const unrestricted = await debrid.unrestrictLink(linkToUnrestrict);
-    if (!unrestricted) throw new Error('Failed to unrestrict link.');
-    res.redirect(unrestricted.download);
+    logger.info(`[API-PLAYER] Resolving download for file "${fileToPlay.path}" (ID: ${fileToPlay.id})`);
+    const downloadUrl = await debrid.getDownloadLinkForFile(readyTorrent.id, fileToPlay.id);
+    if (!downloadUrl) {
+        throw new Error('Failed to obtain download link from TorBox.');
+    }
+    res.redirect(downloadUrl);
 }
 
 async function playFromReadyMovieTorrent(res, readyTorrent) {
-    const linkToUnrestrict = readyTorrent.links[0];
-    if (!linkToUnrestrict) throw new Error(`Could not find any links in the movie torrent.`);
-    const unrestricted = await debrid.unrestrictLink(linkToUnrestrict);
-    if (!unrestricted) throw new Error('Failed to unrestrict movie link.');
-    res.redirect(unrestricted.download);
+    const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
+    if (!selectedFiles.length) throw new Error('No selected files in movie torrent.');
+
+    let fileToPlay = null;
+    const videoFiles = selectedFiles.filter(f => /\.(mkv|mp4|avi|mov|wmv|flv|webm)$/i.test(f.path));
+    if (videoFiles.length) {
+        fileToPlay = videoFiles.reduce((a, b) => (a.bytes > b.bytes ? a : b));
+    } else {
+        fileToPlay = selectedFiles.reduce((a, b) => (a.bytes > b.bytes ? a : b));
+    }
+
+    logger.info(`[API-PLAYER] Resolving download for movie file "${fileToPlay.path}" (ID: ${fileToPlay.id})`);
+    const downloadUrl = await debrid.getDownloadLinkForFile(readyTorrent.id, fileToPlay.id);
+    if (!downloadUrl) {
+        throw new Error('Failed to obtain movie download link from TorBox.');
+    }
+    res.redirect(downloadUrl);
 }
 
 // ================== ADDON SERVER ==================
@@ -256,17 +265,15 @@ async function startAddonServer() {
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
-        // --- P2P stream mapper (fixed: use fileIndex) ---
         const mapToP2PStreams = (sortedStreams) =>
             sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                 title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
                 infoHash: s.infoHash,
-                fileIdx: s.fileIndex,   // ✅ fileIndex from matcher
+                fileIdx: s.fileIndex,
                 behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
             }));
 
-        // --- Debrid stream mapper ---
         const mapToDebridStreams = (sortedStreams) =>
             sortedStreams.map(s => {
                 const prefix = s.isCached ? '⚡' : '⌛';
@@ -278,7 +285,6 @@ async function startAddonServer() {
                 };
             });
 
-        // --- DB‑cached rows (provider‑aware) ---
         const cachedRows = debrid.isEnabled && DEBRID_PROVIDER
             ? (await pool.query(
                 "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
@@ -286,7 +292,6 @@ async function startAddonServer() {
             )).rows
             : [];
 
-        // --- Matching ---
         let resultStreams = [], cachedStreams = [];
 
         if (type === 'series') {
@@ -332,7 +337,6 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
-        // ========== checkCached pre‑filter ==========
         if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
             const hashesToCheck = sortedStreams.map(s => s.infoHash);
             if (hashesToCheck.length > 0) {
@@ -356,12 +360,11 @@ async function startAddonServer() {
             }
         }
 
-        // Build final stream list
         const streams = [];
         if (debrid.isEnabled) {
             const cachedSorted = sortedStreams.filter(s => s.isCached);
             streams.push(...mapToDebridStreams(cachedSorted));
-            streams.push(...mapToP2PStreams(sortedStreams)); // P2P fallback for all
+            streams.push(...mapToP2PStreams(sortedStreams));
         } else {
             streams.push(...mapToP2PStreams(sortedStreams));
         }

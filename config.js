@@ -25,18 +25,44 @@ export const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID; // Optional
 const langs = process.env.PREFERRED_LANGUAGES;
 export const PREFERRED_LANGUAGES = langs ? langs.split(',').map(l => l.trim()) : [];
 export const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD) || 0.75;
-// NEW: Optional strict language filtering
 export const STRICT_LANGUAGE_FILTER = process.env.STRICT_LANGUAGE_FILTER === 'true';
-// The number of streams to return for each language/quality combination.
 export const STREAM_LIMIT_PER_QUALITY = parseInt(process.env.STREAM_LIMIT_PER_QUALITY) || 2;
 
-// Critical validation
-if (!REALDEBRID_API_KEY || !TMDB_API_KEY || !BITMAGNET_GRAPHQL_ENDPOINT || !DATABASE_URL) {
-    const missing = [
-        !REALDEBRID_API_KEY && 'REALDEBRID_API_KEY',
-        !TMDB_API_KEY && 'TMDB_API_KEY',
-        !BITMAGNET_GRAPHQL_ENDPOINT && 'BITMAGNET_GRAPHQL_ENDPOINT',
-        !DATABASE_URL && 'DATABASE_URL'
-    ].filter(Boolean).join(', ');
-    throw new Error(`Missing critical environment variables: ${missing}. Check your .env file.`);
+// ================== Modular Debrid Configuration ==================
+export const DEBRID_SERVICE = (process.env.DEBRID_SERVICE || '').toLowerCase() || null;
+
+export const TORBOX_API_KEY = process.env.TORBOX_API_KEY || null;
+export const TORBOX_ENABLED = !!TORBOX_API_KEY;
+export const TORBOX_MAX_ACTIVE_TORRENTS = parseInt(process.env.TORBOX_MAX_ACTIVE_TORRENTS) || 0;
+
+export const REALDEBRID_ENABLED = !!REALDEBRID_API_KEY;
+
+// Auto‑detect debrid service if not explicitly set
+export let debridService = DEBRID_SERVICE;
+if (!debridService) {
+  if (REALDEBRID_ENABLED) debridService = 'realdebrid';
+  else if (TORBOX_ENABLED) debridService = 'torbox';
+}
+
+// Stable alias for use in queries
+export const DEBRID_PROVIDER = debridService;
+
+// Cache table name (for generic debrid mapping)
+export const DEBRID_CACHE_TABLE = process.env.DEBRID_CACHE_TABLE || 'debrid_cache';
+
+// ================== Validation ==================
+const missing = [];
+if (!TMDB_API_KEY) missing.push('TMDB_API_KEY');
+if (!BITMAGNET_GRAPHQL_ENDPOINT) missing.push('BITMAGNET_GRAPHQL_ENDPOINT');
+if (!DATABASE_URL) missing.push('DATABASE_URL');
+
+if (debridService === 'realdebrid' && !REALDEBRID_API_KEY) {
+  console.warn('DEBRID_SERVICE set to realdebrid but REALDEBRID_API_KEY is missing. Falling back to P2P only.');
+}
+if (debridService === 'torbox' && !TORBOX_API_KEY) {
+  console.warn('DEBRID_SERVICE set to torbox but TORBOX_API_KEY is missing. Falling back to P2P only.');
+}
+
+if (missing.length) {
+  throw new Error(`Missing critical environment variables: ${missing.join(', ')}. Check your .env file.`);
 }

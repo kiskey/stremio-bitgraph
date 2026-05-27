@@ -1,5 +1,5 @@
 // File: src/debrid/torbox.js
-// Version: 3.2 – Clean import, verified API endpoints, placeholder links, robust file resolution
+// Version: 3.3 – Return torrent_id from checkCached response
 
 import axios from 'axios';
 import FormData from 'form-data';
@@ -307,6 +307,7 @@ const torbox = {
     }));
   },
 
+  // ✅ checkCached now returns torrent_id when available
   async checkCached(hashes) {
     if (!Array.isArray(hashes) || hashes.length === 0) return {};
     const body = { hashes };
@@ -324,6 +325,7 @@ const torbox = {
         if (typeof value === 'object' && value !== null) {
           result[hash] = {
             cached: true,
+            torrent_id: value.id,          // ← new: the actual TorBox torrent ID
             name: value.name,
             size: value.size,
             files: value.files || [],

@@ -1,5 +1,5 @@
 // File: src/debrid/torbox.js
-// Version: 3.1 – Verified endpoints + proper debug logging
+// Version: 3.2 – Placeholder links that unrestrictLink resolves to real download URLs
 
 import axios from 'axios';
 import FormData from 'form-data';
@@ -93,10 +93,10 @@ async function cleanupStaleActiveTorrents(maxActive) {
   const needToRemove = count - maxActive + 1;
   const toRemove = staleList.slice(0, Math.min(needToRemove, staleList.length));
   if (toRemove.length === 0) {
-    logger.warn(`Active torrent count=${count}, max=${maxActive}, but no stale torrents to remove.`);
+    logger.warn(`Active count=${count}, max=${maxActive}, but no stale torrents.`);
     return;
   }
-  logger.info(`Cleaning ${toRemove.length} stale active torrents to stay under max ${maxActive}.`);
+  logger.info(`Cleaning ${toRemove.length} stale torrents.`);
   for (const id of toRemove) {
     await deleteTorrentFromProvider(id);
     if (cache) {
@@ -107,7 +107,7 @@ async function cleanupStaleActiveTorrents(maxActive) {
 }
 
 async function fetchFullTorrentInfo(torrentId) {
-  logger.debug(`Fetching full torrent info for ${torrentId} from mylist? id=...`);
+  logger.debug(`Fetching full info for torrent ${torrentId} via /mylist`);
   const { data } = await axios.get(`${BASE_URL}/torrents/mylist`, {
     headers: { Authorization: `Bearer ${apiKey}` },
     params: { id: torrentId },
@@ -130,7 +130,7 @@ const torbox = {
   setup,
   isEnabled: !!apiKey,
 
-  // 1. addMagnet
+  // ── 1. addMagnet (unchanged, but uses cache) ───────────────────
   async addMagnet(magnet) {
     const infohash = extractInfoHash(magnet);
     if (!infohash) throw new Error('Invalid magnet link');
@@ -138,14 +138,14 @@ const torbox = {
     if (infohash && recentMagnetAdds.has(infohash)) {
       const prev = recentMagnetAdds.get(infohash);
       if (Date.now() - prev.timestamp < DEDUP_WINDOW_MS) {
-        logger.debug(`Reusing recently added torrent for ${infohash} (torrentId=${prev.torrentId})`);
+        logger.debug(`Reusing recent add: torrentId=${prev.torrentId}`);
         return { id: prev.torrentId, hash: infohash, cached: true };
       }
     }
 
     if (!checkAddMagnetRateLimit()) {
       logger.warn('addMagnet rate limit exceeded.');
-      throw new Error('TorBox addMagnet rate limit exceeded. Please wait.');
+      throw new Error('TorBox addMagnet rate limit exceeded.');
     }
 
     const maxActive = TORBOX_MAX_ACTIVE_TORRENTS || 0;
@@ -157,7 +157,7 @@ const torbox = {
       const cached = await cache.get(infohash);
       if (cached && cached.provider_torrent_id) {
         try {
-          logger.debug(`Cache hit for ${infohash} -> torrentId ${cached.provider_torrent_id}, checking if still active.`);
+          logger.debug(`Cache hit for ${infohash}, checking if still active.`);
           const info = await this.getTorrentInfo(cached.provider_torrent_id);
           return { id: cached.provider_torrent_id, hash: infohash, cached: true, ...info };
         } catch (e) { /* stale */ }
@@ -203,25 +203,33 @@ const torbox = {
     throw lastError || new Error('Failed to add magnet to TorBox.');
   },
 
-  // 2. getTorrentInfo
+  // ── 2. getTorrentInfo (placeholder links) ──────────────────────
   async getTorrentInfo(id) {
     try {
-      logger.debug(`getTorrentInfo(${id})`);
       const torrent = await fetchFullTorrentInfo(id);
       const rawStatus = torrent.download_state || torrent.status || 'MISSING';
       const tbStatus = mapStatus(rawStatus);
 
       const selectedSet = torrentSelections.get(id) || new Set();
       const files = (torrent.files || []).map(f => ({
-        id: f.id,
+        id: f.id,                  // real file ID from TorBox
         path: f.name,
         bytes: f.size,
         selected: selectedSet.size === 0 || selectedSet.has(f.id) ? 1 : 0,
       }));
 
+      // Build links: placeholders that unrestrictLink can resolve
       const links = [];
       if (tbStatus === 'downloaded' && torrent.files) {
-        torrent.files.forEach(() => links.push(null));
+        for (const f of torrent.files) {
+          // Store a placeholder string that identifies the file
+          links.push(`tb:${id}:${f.id}`);
+        }
+      } else {
+        // Not downloaded yet → fill with nulls (will be ignored by player anyway)
+        for (const f of files) {
+          links.push(null);
+        }
       }
 
       return { id, filename: torrent.name, status: tbStatus, files, links };
@@ -232,10 +240,9 @@ const torbox = {
     }
   },
 
-  // 3. selectFiles
+  // ── 3. selectFiles ────────────────────────────────────────────
   async selectFiles(id, fileIds = 'all') {
     try {
-      logger.debug(`selectFiles(${id}, ${JSON.stringify(fileIds)})`);
       const torrent = await fetchFullTorrentInfo(id);
       if (fileIds === 'all') {
         const allIds = (torrent.files || []).map(f => f.id);
@@ -253,15 +260,28 @@ const torbox = {
     }
   },
 
-  // 4. unrestrictLink
+  // ── 4. unrestrictLink (resolves placeholder to real download) ──
   async unrestrictLink(link) {
-    if (link && (link.startsWith('http://') || link.startsWith('https://'))) {
+    if (!link) throw new Error('No link provided.');
+    if (link.startsWith('http://') || link.startsWith('https://')) {
       return { download: link };
     }
-    throw new Error('TorBox does not support hoster link unrestriction.');
+    // Placeholder format: "tb:torrentId:fileId"
+    if (link.startsWith('tb:')) {
+      const parts = link.split(':');
+      if (parts.length === 3) {
+        const torrentId = parts[1];
+        const fileId = parts[2];
+        logger.info(`Resolving TorBox download link for torrent ${torrentId}, file ${fileId}`);
+        const url = await this.getDownloadLinkForFile(torrentId, fileId);
+        if (!url) throw new Error('Failed to obtain download link from TorBox.');
+        return { download: url };
+      }
+    }
+    throw new Error('Invalid TorBox link format.');
   },
 
-  // 5. addAndSelect
+  // ── 5. addAndSelect ────────────────────────────────────────────
   async addAndSelect(magnet) {
     const addRes = await this.addMagnet(magnet);
     const torrentId = addRes.id;
@@ -272,7 +292,7 @@ const torbox = {
     return null;
   },
 
-  // 6. deleteTorrent
+  // ── 6. deleteTorrent ──────────────────────────────────────────
   async deleteTorrent(id) {
     logger.info(`deleteTorrent(${id})`);
     await deleteTorrentFromProvider(id);
@@ -282,7 +302,7 @@ const torbox = {
     }
   },
 
-  // 7. getTorrents (list active)
+  // ── 7. getTorrents ────────────────────────────────────────────
   async getTorrents() {
     logger.debug('Fetching active torrent list from TorBox...');
     const { data } = await axios.get(`${BASE_URL}/torrents/mylist`, {
@@ -298,7 +318,7 @@ const torbox = {
     }));
   },
 
-  // 8. checkCached
+  // ── 8. checkCached ────────────────────────────────────────────
   async checkCached(hashes) {
     if (!Array.isArray(hashes) || hashes.length === 0) return {};
     const body = { hashes };
@@ -335,7 +355,7 @@ const torbox = {
     }
   },
 
-  // 9. getCachedFileInfo
+  // ── 9. getCachedFileInfo ──────────────────────────────────────
   async getCachedFileInfo(hash, fileName) {
     const cacheResult = await this.checkCached([hash]);
     const info = cacheResult[hash];
@@ -351,7 +371,7 @@ const torbox = {
     };
   },
 
-  // 10. getDownloadLinkForFile
+  // ── 10. getDownloadLinkForFile ─────────────────────────────────
   async getDownloadLinkForFile(torrentId, fileId) {
     try {
       logger.debug(`Requesting download link for torrent ${torrentId} file ${fileId}`);

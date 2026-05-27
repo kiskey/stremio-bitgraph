@@ -1,5 +1,5 @@
 // File: src/debrid/cache.js
-// Version: 1.0 - Abstract cache layer on top of debrid_cache table
+// Version: 2.1 - Add getByProviderId for reverse lookups
 
 import pg from 'pg';
 import { DATABASE_URL, DEBRID_CACHE_TABLE } from '../../config.js';
@@ -12,11 +12,6 @@ function getPool() {
   return pool;
 }
 
-/**
- * Initialize cache for a given provider.
- * @param {string} provider - e.g. 'torbox', 'realdebrid'
- * @returns {object} cache API
- */
 export function createCache(provider) {
   const table = DEBRID_CACHE_TABLE;
 
@@ -89,6 +84,20 @@ export function createCache(provider) {
           `DELETE FROM ${table} WHERE provider = $1 AND hash = $2`,
           [provider, hash]
         );
+      } finally {
+        client.release();
+      }
+    },
+
+    // ✅ New method for reverse lookup
+    async getByProviderId(provider_torrent_id) {
+      const client = await getPool().connect();
+      try {
+        const res = await client.query(
+          `SELECT * FROM ${table} WHERE provider = $1 AND provider_torrent_id = $2`,
+          [provider, provider_torrent_id]
+        );
+        return res.rows[0] || null;
       } finally {
         client.release();
       }

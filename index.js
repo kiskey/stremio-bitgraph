@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.8 – In-memory cache for cached torrent info, skipping redundant debrid calls
+// Version: 2.9 – Optimised cache using checkCached's torrent_id (instant playback)
 
 import express from 'express';
 import cors from 'cors';
@@ -18,9 +18,8 @@ import PTT from 'parse-torrent-title';
 import debrid from './src/debrid/index.js';
 import { pollTorrentUntilReady } from './src/debrid/utils.js';
 
-// ── In‑memory cache for resolved torrent info (12h TTL) ──────────
+// In‑memory cache for resolved torrent info (12h TTL)
 import { torrentInfoCache } from './src/debrid/cachedInfoCache.js';
-import { createCache } from './src/debrid/cache.js';   // to read torrent_id from generic cache
 
 const processingLock = new Map();
 
@@ -58,7 +57,7 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else if (DEBRID_PROVIDER) {
-                // ✅ New: check in‑memory cache first (pre‑resolved cached torrent)
+                // ✅ Check in‑memory cache first
                 const cachedResolved = torrentInfoCache.get(infoHash);
                 if (cachedResolved) {
                     logger.info(`[API] In‑memory cache hit for ${infoHash}. Using pre‑resolved info.`);
@@ -206,7 +205,7 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
-// ================== PLAYER HELPERS (unchanged from v2.7) ==================
+// ================== PLAYER HELPERS (unchanged) ==================
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
@@ -348,38 +347,35 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
-        // ── checkCached + cache pre‑resolved info for future API requests ──
+        // ── checkCached + cache pre‑resolved info (now using torrent_id from checkCached) ──
         if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
             const hashesToCheck = sortedStreams.map(s => s.infoHash);
             if (hashesToCheck.length > 0) {
                 logger.debug(`[ADDON] Calling debrid.checkCached for ${hashesToCheck.length} hashes.`);
                 try {
                     const cacheStatus = await debrid.checkCached(hashesToCheck);
-                    // We need a generic cache instance to look up torrent IDs
-                    const idCache = createCache(DEBRID_PROVIDER);  // 'torbox' or 'realdebrid'
 
                     for (const s of sortedStreams) {
                         const cs = cacheStatus[s.infoHash];
                         if (cs && cs.cached) {
                             s.isCached = true;
 
-                            // ✅ Build & store pre‑resolved info for instant playback
-                            const cachedTorrent = await idCache.get(s.infoHash);
-                            if (cachedTorrent && cachedTorrent.provider_torrent_id) {
+                            // ✅ Store pre‑resolved info using torrent_id from checkCached
+                            if (cs.torrent_id) {
                                 const files = (cs.files || []).map(f => ({
-                                    id: f.id,          // real file ID
+                                    id: f.id,
                                     path: f.name,
                                     bytes: f.size,
-                                    selected: 1,       // assume all selected
+                                    selected: 1,      // assume all selected
                                 }));
                                 const resolved = {
-                                    id: cachedTorrent.provider_torrent_id,   // torrent ID
+                                    id: cs.torrent_id,
                                     filename: cs.name,
                                     files,
                                     status: 'downloaded',
                                 };
                                 torrentInfoCache.set(s.infoHash, resolved);
-                                logger.debug(`[ADDON] Stored pre-resolved info for ${s.infoHash} (torrentId=${resolved.id})`);
+                                logger.debug(`[ADDON] Stored pre-resolved info for ${s.infoHash} (torrentId=${cs.torrent_id})`);
                             }
                         } else {
                             s.isCached = false;

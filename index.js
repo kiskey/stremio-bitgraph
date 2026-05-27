@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.4 – checkCached integration, P2P fileIdx fix, 451 terminal handling
+// Version: 2.5 – Enhanced logging for TorBox integration, fixed P2P fileIdx, 451 handling
 
 import express from 'express';
 import cors from 'cors';
@@ -54,6 +54,7 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else if (DEBRID_PROVIDER) {
+                logger.debug(`[API] No lock entry. Checking DB cache for ${infoHash} (provider=${DEBRID_PROVIDER})`);
                 const { rows } = await pool.query(
                     "SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
                     [infoHash, imdbId, type, DEBRID_PROVIDER]
@@ -61,15 +62,16 @@ async function startApiServer() {
                 if (rows.length > 0) {
                     logger.info(`[API] DB cache hit for ${infoHash}.`);
                     torrentInfo = rows[0].torrent_info_json;
+                } else {
+                    logger.debug(`[API] No DB cache for ${infoHash}.`);
                 }
             }
 
-            if (!torrentInfo) {
+            if (!torrentInfo && DEBRID_PROVIDER) {
+                logger.info(`[API] Starting new debrid process for ${infoHash}.`);
                 const processPromise = new Promise(async (resolve, reject) => {
                     let torrentId = null;
                     try {
-                        logger.info(`[API] No cache hit for ${infoHash}. Starting new debrid process.`);
-
                         const activeTorrents = await debrid.getTorrents();
                         const existingTorrent = activeTorrents.find(t => t.hash.toLowerCase() === infoHash.toLowerCase());
 
@@ -128,21 +130,18 @@ async function startApiServer() {
                         );
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
-                        if (DEBRID_PROVIDER) {
-                            await pool.query(
-                                `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
-                                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                                 ON CONFLICT (infohash, tmdb_id, content_type, provider)
-                                 DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
-                                [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
-                            );
-                        }
+                        await pool.query(
+                            `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                             ON CONFLICT (infohash, tmdb_id, content_type, provider)
+                             DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
+                            [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
+                        );
 
                         resolve(readyTorrent);
                     } catch (error) {
                         const errMsg = error.message || '';
                         const statusCode = error.response?.status;
-                        // ✅ Treat HTTP 451 (legal block) as terminal
                         const isTerminal = errMsg.includes('magnet_error') ||
                                            errMsg.includes('virus') ||
                                            errMsg.includes('rejected') ||
@@ -179,10 +178,15 @@ async function startApiServer() {
                 }
             }
 
-            if (type === 'series') {
-                await playFromReadyTorrent(res, torrentInfo, season, episode);
+            if (torrentInfo) {
+                if (type === 'series') {
+                    await playFromReadyTorrent(res, torrentInfo, season, episode);
+                } else {
+                    await playFromReadyMovieTorrent(res, torrentInfo);
+                }
             } else {
-                await playFromReadyMovieTorrent(res, torrentInfo);
+                // No debrid provider or no info found -> should never happen for P2P because they don't hit this server
+                res.status(404).send('Torrent not available via debrid.');
             }
         } catch (error) {
             logger.error(`[API] Final error processing ${infoHash}: ${error.message}`);
@@ -252,13 +256,13 @@ async function startAddonServer() {
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
-        // --- P2P stream mapper (✅ fixed: use fileIndex) ---
+        // --- P2P stream mapper (fixed: use fileIndex) ---
         const mapToP2PStreams = (sortedStreams) =>
             sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                 title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
                 infoHash: s.infoHash,
-                fileIdx: s.fileIndex,   // ✅ matcher uses fileIndex
+                fileIdx: s.fileIndex,   // ✅ fileIndex from matcher
                 behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
             }));
 
@@ -332,6 +336,7 @@ async function startAddonServer() {
         if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
             const hashesToCheck = sortedStreams.map(s => s.infoHash);
             if (hashesToCheck.length > 0) {
+                logger.debug(`[ADDON] Calling debrid.checkCached for ${hashesToCheck.length} hashes.`);
                 try {
                     const cacheStatus = await debrid.checkCached(hashesToCheck);
                     for (const s of sortedStreams) {
@@ -342,8 +347,10 @@ async function startAddonServer() {
                             s.isCached = false;
                         }
                     }
+                    const cachedCount = sortedStreams.filter(s => s.isCached).length;
+                    logger.info(`[ADDON] checkCached result: ${cachedCount} / ${sortedStreams.length} torrents are cached.`);
                 } catch (err) {
-                    logger.warn(`checkCached failed, treating all as uncached: ${err.message}`);
+                    logger.warn(`[ADDON] checkCached failed, treating all as uncached: ${err.message}`);
                     sortedStreams.forEach(s => s.isCached = false);
                 }
             }
@@ -352,11 +359,9 @@ async function startAddonServer() {
         // Build final stream list
         const streams = [];
         if (debrid.isEnabled) {
-            // Only debrid streams for cached torrents
             const cachedSorted = sortedStreams.filter(s => s.isCached);
             streams.push(...mapToDebridStreams(cachedSorted));
-            // P2P fallback for all
-            streams.push(...mapToP2PStreams(sortedStreams));
+            streams.push(...mapToP2PStreams(sortedStreams)); // P2P fallback for all
         } else {
             streams.push(...mapToP2PStreams(sortedStreams));
         }

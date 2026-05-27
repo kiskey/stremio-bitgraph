@@ -1,9 +1,9 @@
 // File: src/debrid/torbox.js
-// Version: 2.1 – Fixed _getHashFromTorrentId implementation
+// Version: 2.1 – Use logger (not log)
 
 import axios from 'axios';
 import { TORBOX_API_KEY, TORBOX_MAX_ACTIVE_TORRENTS } from '../../config.js';
-import { log } from '../utils.js';
+import { logger } from '../utils.js';
 
 const BASE_URL = 'https://api.torbox.app/v1';
 const apiKey = TORBOX_API_KEY;
@@ -74,7 +74,7 @@ const torbox = {
 
         const result = await this._request('post', '/torrents/add', { magnet });
         const torrentId = result.data?.id;
-        log('info', `TorBox magnet added: ${torrentId}`);
+        logger.info(`TorBox magnet added: ${torrentId}`);
 
         if (cache && torrentId) {
           await cache.set(hash, {
@@ -85,7 +85,7 @@ const torbox = {
         }
         return result.data;
       } catch (error) {
-        log('error', `TorBox addMagnet failed: ${error.message}`);
+        logger.error(`TorBox addMagnet failed: ${error.message}`);
         throw error;
       }
     })();
@@ -105,7 +105,7 @@ const torbox = {
 
   async selectFiles(id, fileIds) {
     await this._request('post', `/torrents/${id}/select`, { files: fileIds });
-    log('info', `TorBox files selected for ${id}`);
+    logger.info(`TorBox files selected for ${id}`);
   },
 
   async unrestrictLink(link) {
@@ -125,7 +125,7 @@ const torbox = {
 
   async deleteTorrent(id) {
     await this._request('delete', `/torrents/${id}`);
-    log('info', `TorBox torrent deleted: ${id}`);
+    logger.info(`TorBox torrent deleted: ${id}`);
     if (cache) {
       const hash = await this._getHashFromTorrentId(id);
       if (hash) {
@@ -145,7 +145,7 @@ const torbox = {
       const response = await this._request('post', '/torrents/checkcached', { hashes });
       return response.data || {};
     } catch (err) {
-      log('error', `checkCached error: ${err.message}`);
+      logger.error(`checkCached error: ${err.message}`);
       return {};
     }
   },
@@ -161,19 +161,18 @@ const torbox = {
       const data = await this._request('get', `/torrents/${torrentId}/files/${fileId}/download`);
       return data.download || data.link;
     } catch (err) {
-      log('error', `getDownloadLinkForFile error: ${err.message}`);
+      logger.error(`getDownloadLinkForFile error: ${err.message}`);
       return null;
     }
   },
 
-  // ✅ Proper implementation using cache.getByProviderId
   async _getHashFromTorrentId(torrentId) {
     if (!cache) return null;
     try {
       const row = await cache.getByProviderId(torrentId);
       return row?.hash || null;
     } catch (error) {
-      log('error', `Failed to find hash for TorBox ID ${torrentId}: ${error.message}`);
+      logger.error(`Failed to find hash for TorBox ID ${torrentId}: ${error.message}`);
       return null;
     }
   },

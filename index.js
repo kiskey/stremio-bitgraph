@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.9 – Optimised cache using checkCached's torrent_id (instant playback)
+// Version: 2.9.1 – P2P fallback fileIdx default for movies + debrid acceleration
 
 import express from 'express';
 import cors from 'cors';
@@ -57,7 +57,6 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else if (DEBRID_PROVIDER) {
-                // ✅ Check in‑memory cache first
                 const cachedResolved = torrentInfoCache.get(infoHash);
                 if (cachedResolved) {
                     logger.info(`[API] In‑memory cache hit for ${infoHash}. Using pre‑resolved info.`);
@@ -275,12 +274,13 @@ async function startAddonServer() {
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
+        // ✅ P2P stream mapper with safe fileIdx default
         const mapToP2PStreams = (sortedStreams) =>
             sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                 title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
                 infoHash: s.infoHash,
-                fileIdx: s.fileIndex,
+                fileIdx: s.fileIndex ?? 0,   // fallback to 0 for movies or any missing index
                 behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
             }));
 
@@ -347,7 +347,6 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
-        // ── checkCached + cache pre‑resolved info (now using torrent_id from checkCached) ──
         if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
             const hashesToCheck = sortedStreams.map(s => s.infoHash);
             if (hashesToCheck.length > 0) {
@@ -360,13 +359,12 @@ async function startAddonServer() {
                         if (cs && cs.cached) {
                             s.isCached = true;
 
-                            // ✅ Store pre‑resolved info using torrent_id from checkCached
                             if (cs.torrent_id) {
                                 const files = (cs.files || []).map(f => ({
                                     id: f.id,
                                     path: f.name,
                                     bytes: f.size,
-                                    selected: 1,      // assume all selected
+                                    selected: 1,
                                 }));
                                 const resolved = {
                                     id: cs.torrent_id,

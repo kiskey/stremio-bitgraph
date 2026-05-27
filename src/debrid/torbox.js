@@ -1,5 +1,5 @@
 // File: src/debrid/torbox.js
-// Version: 2.0 - TorBox module with generic cache (no provider-specific tables)
+// Version: 2.1 – Fixed _getHashFromTorrentId implementation
 
 import axios from 'axios';
 import { TORBOX_API_KEY, TORBOX_MAX_ACTIVE_TORRENTS } from '../../config.js';
@@ -8,7 +8,6 @@ import { log } from '../utils.js';
 const BASE_URL = 'https://api.torbox.app/v1';
 const apiKey = TORBOX_API_KEY;
 
-// Deduplication and rate-limiting
 const activeAdds = new Map();
 const RATE_LIMIT_WINDOW = 2000;
 let lastAddTime = 0;
@@ -20,7 +19,7 @@ class ResourceNotFoundError extends Error {
   }
 }
 
-let cache = null; // will be injected by factory
+let cache = null;
 
 export function setup(cacheInstance) {
   cache = cacheInstance;
@@ -49,30 +48,26 @@ const torbox = {
     const hash = _extractHash(magnet);
     if (!hash) throw new Error('Invalid magnet link');
 
-    // Rate-limit
     const now = Date.now();
     if (now - lastAddTime < RATE_LIMIT_WINDOW) {
       await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_WINDOW - (now - lastAddTime)));
     }
     lastAddTime = Date.now();
 
-    // Deduplicate identical in-flight requests
     if (activeAdds.has(magnet)) {
       return activeAdds.get(magnet);
     }
 
     const promise = (async () => {
       try {
-        // Check cache first if available
         if (cache) {
           const cached = await cache.get(hash);
           if (cached && cached.provider_torrent_id) {
-            // Try to fetch info, maybe still active
             try {
               const info = await this.getTorrentInfo(cached.provider_torrent_id);
               return info;
             } catch (e) {
-              // Not found or expired, we'll add new
+              // not found, proceed to add
             }
           }
         }
@@ -114,7 +109,6 @@ const torbox = {
   },
 
   async unrestrictLink(link) {
-    // For direct downloads we return the link itself
     return { download: link };
   },
 
@@ -133,7 +127,6 @@ const torbox = {
     await this._request('delete', `/torrents/${id}`);
     log('info', `TorBox torrent deleted: ${id}`);
     if (cache) {
-      // Find hash for this id and update status
       const hash = await this._getHashFromTorrentId(id);
       if (hash) {
         await cache.update(hash, { status: 'deleted' });
@@ -146,11 +139,6 @@ const torbox = {
     return data.data || [];
   },
 
-  /**
-   * Native TorBox cached check.
-   * @param {string[]} hashes
-   * @returns {Promise<object>} { hash: bool|object }
-   */
   async checkCached(hashes) {
     if (!hashes?.length) return {};
     try {
@@ -162,18 +150,12 @@ const torbox = {
     }
   },
 
-  /**
-   * Get file info from cached result
-   */
   getCachedFileInfo(hash, fileName, cachedResults) {
     const cached = cachedResults?.[hash];
     if (!cached || typeof cached === 'boolean') return null;
     return (cached.files || []).find(f => f.name === fileName) || null;
   },
 
-  /**
-   * Get a direct download link for a specific file
-   */
   async getDownloadLinkForFile(torrentId, fileId) {
     try {
       const data = await this._request('get', `/torrents/${torrentId}/files/${fileId}/download`);
@@ -184,16 +166,16 @@ const torbox = {
     }
   },
 
-  // Internal helper to map torrent ID back to hash (from cache)
+  // ✅ Proper implementation using cache.getByProviderId
   async _getHashFromTorrentId(torrentId) {
     if (!cache) return null;
-    // This is a simple linear scan; better to add an index or reverse mapping,
-    // but for a small number of entries it's fine.
-    // We can query the cache table directly (via pg) or add a dedicated method in cache.
-    // For simplicity, we can do a direct SQL query via pool inside cache (optional).
-    // For now, we'll rely on a cache method that accepts torrentId.
-    // We'll add a getByProviderId method to cache.
-    return null; // Implementation left as exercise; not critical.
+    try {
+      const row = await cache.getByProviderId(torrentId);
+      return row?.hash || null;
+    } catch (error) {
+      log('error', `Failed to find hash for TorBox ID ${torrentId}: ${error.message}`);
+      return null;
+    }
   },
 
   ResourceNotFoundError,

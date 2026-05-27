@@ -1,9 +1,9 @@
 // File: src/debrid/realdebrid.js
-// Version: 2.0 - Unified debrid module (Real-Debrid)
+// Version: 2.1 – Use logger (not log)
 
 import axios from 'axios';
 import { REALDEBRID_API_KEY } from '../../config.js';
-import { log } from '../utils.js';
+import { logger } from '../utils.js';
 
 const BASE_URL = 'https://api.real-debrid.com/rest/1.0';
 const apiKey = REALDEBRID_API_KEY;
@@ -40,7 +40,6 @@ async function request(method, path, data = null) {
   }
 }
 
-// Standard debrid interface methods
 const realdebrid = {
   isEnabled: !!apiKey,
 
@@ -48,7 +47,7 @@ const realdebrid = {
     const form = new URLSearchParams();
     form.append('magnet', magnet);
     const data = await request('post', '/torrents/addMagnet', form.toString());
-    log('info', `Real-Debrid magnet added: ${data.id}`);
+    logger.info(`Real-Debrid magnet added: ${data.id}`);
     return data;
   },
 
@@ -60,7 +59,7 @@ const realdebrid = {
     const form = new URLSearchParams();
     form.append('files', fileIds.join(','));
     await request('post', `/torrents/selectFiles/${id}`, form.toString());
-    log('info', `Real-Debrid files selected for ${id}`);
+    logger.info(`Real-Debrid files selected for ${id}`);
   },
 
   async unrestrictLink(link) {
@@ -71,21 +70,19 @@ const realdebrid = {
 
   async addAndSelect(magnet) {
     const torrent = await this.addMagnet(magnet);
-    // Auto-select all files (or largest video file – kept simple)
-    const files = torrent?.files || [];
-    const fileIds = files.map((f, i) => i).filter(i => {
-      const name = files[i].path;
-      return /\.(mkv|mp4|avi|mov|wmv|flv|webm)$/i.test(name);
-    });
-    if (fileIds.length) {
-      await this.selectFiles(torrent.id, fileIds);
+    const info = await this.getTorrentInfo(torrent.id);
+    const videoFiles = (info.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv|flv|webm)$/i.test(f.path || f.name));
+    if (videoFiles.length) {
+      const largest = videoFiles.reduce((a, b) => (a.size > b.size ? a : b));
+      const fileIdx = info.files.indexOf(largest);
+      await this.selectFiles(torrent.id, [fileIdx]);
     }
     return this.getTorrentInfo(torrent.id);
   },
 
   async deleteTorrent(id) {
     await request('delete', `/torrents/delete/${id}`);
-    log('info', `Real-Debrid torrent deleted: ${id}`);
+    logger.info(`Real-Debrid torrent deleted: ${id}`);
   },
 
   async getTorrents() {

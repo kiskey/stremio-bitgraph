@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.0 – Modular debrid integration (preserving all original logic)
+// Version: 2.2 – Provider-aware torrents table + modular debrid
 
 import express from 'express';
 import cors from 'cors';
@@ -7,7 +7,7 @@ import sdk from 'stremio-addon-sdk';
 const { addonBuilder, serveHTTP } = sdk;
 
 import { manifest } from './manifest.js';
-import { PORT, API_PORT, APP_HOST, ADDON_ID, PREFERRED_LANGUAGES } from './config.js';
+import { PORT, API_PORT, APP_HOST, ADDON_ID, PREFERRED_LANGUAGES, DEBRID_PROVIDER } from './config.js';
 import { initDb, pool } from './db.js';
 import { logger, getQuality, formatSize, robustParseInfo, sleep } from './src/utils.js';
 import { getMetaDetails } from './src/metadata.js';
@@ -15,7 +15,6 @@ import { searchTorrents } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import PTT from 'parse-torrent-title';
 
-// --- MODULAR DEBRID (FACTORY) ---
 import debrid from './src/debrid/index.js';
 import { pollTorrentUntilReady } from './src/debrid/utils.js';
 
@@ -55,13 +54,14 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else {
+                // ✅ Provider-aware lookup
                 const { rows } = await pool.query(
-                    "SELECT rd_torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3",
-                    [infoHash, imdbId, type]
+                    "SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
+                    [infoHash, imdbId, type, DEBRID_PROVIDER]
                 );
                 if (rows.length > 0) {
                     logger.info(`[API] DB cache hit for ${infoHash}.`);
-                    torrentInfo = rows[0].rd_torrent_info_json;
+                    torrentInfo = rows[0].torrent_info_json;
                 }
             }
 
@@ -92,7 +92,6 @@ async function startApiServer() {
                             if (!addResult) throw new Error('Failed to add magnet to debrid.');
                             torrentId = addResult.id;
 
-                            // --- Pre-Selection Safety Loop (unchanged) ---
                             logger.info(`[API] Torrent added (ID: ${torrentId}). Waiting for metadata...`);
                             let readyForSelection = false;
                             const maxPreChecks = 10;
@@ -120,25 +119,24 @@ async function startApiServer() {
 
                             const freshInfo = await debrid.getTorrentInfo(torrentId);
                             if (freshInfo && freshInfo.status === 'waiting_files_selection') {
-                                // Select all files (convert 'all' to array of indices)
                                 const fileIds = freshInfo.files.map((_, idx) => idx);
                                 await debrid.selectFiles(torrentId, fileIds);
                             }
                         }
 
-                        // Poll until ready (using the modular utility)
                         const readyTorrent = await pollTorrentUntilReady(
                             torrentId,
                             (id) => debrid.getTorrentInfo(id)
                         );
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
+                        // ✅ Provider-aware insert
                         await pool.query(
-                            `INSERT INTO torrents (infohash, tmdb_id, content_type, rd_torrent_info_json, language, quality, seeders)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7)
-                             ON CONFLICT (infohash, tmdb_id, content_type)
-                             DO UPDATE SET rd_torrent_info_json = EXCLUDED.rd_torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
-                            [infoHash, imdbId, type, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
+                            `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                             ON CONFLICT (infohash, tmdb_id, content_type, provider)
+                             DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
+                            [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
                         );
 
                         resolve(readyTorrent);
@@ -193,7 +191,7 @@ async function startApiServer() {
     app.listen(API_PORT, () => logger.info(`[API] Express API server listening on http://127.0.0.1:${API_PORT}`));
 }
 
-// ================== PLAYER HELPERS (unchanged logic, only debrid call updated) ==================
+// ================== PLAYER HELPERS ==================
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
@@ -275,9 +273,10 @@ async function startAddonServer() {
             return { streams: [] };
         }
 
+        // ✅ Provider-aware retrieval of cached torrents
         const { rows } = await pool.query(
-            "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND rd_torrent_info_json IS NOT NULL",
-            [imdbId, type]
+            "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+            [imdbId, type, DEBRID_PROVIDER]
         );
 
         // --- MATCHING LOGIC (V3.2 Intelligence) ---
@@ -298,11 +297,8 @@ async function startAddonServer() {
                 PREFERRED_LANGUAGES
             );
 
-            logger.info(`[ADDON] Targeted search yielded ${refinedTorrents.length} raw hits and ${resultStreams.length} valid streams.`);
-
             if (refinedTorrents.length < 10 || resultStreams.length === 0) {
                 logger.info(`[ADDON] Search potentially weak. Falling back to BROAD search for "${meta.name}"...`);
-
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(
                     meta,
@@ -328,19 +324,15 @@ async function startAddonServer() {
                         existingCachedHashes.add(stream.infoHash);
                     }
                 }
-
-                logger.info(`[ADDON] Broad search merged. Total streams now: ${resultStreams.length}`);
             }
 
             const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
-            logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for series ${id}`);
             return { streams: mapToStreamObjects(sortedStreams) };
         }
 
         if (type === 'movie') {
             logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
             const broadTorrents = await searchTorrents(meta.name, 'movie', 100);
-
             const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
             const { streams, cachedStreams } = await matcher.findBestMovieStreams(
                 movieMetaForMatcher,
@@ -350,7 +342,6 @@ async function startAddonServer() {
             );
 
             const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
-            logger.info(`[ADDON] Returning ${sortedStreams.length} total streams for movie ${id}`);
             return { streams: mapToStreamObjects(sortedStreams) };
         }
 
@@ -358,8 +349,6 @@ async function startAddonServer() {
     });
 
     serveHTTP(builder.getInterface(), { port: PORT });
-    logger.info(`[ADDON] Stremio addon server listening on http://127.0.0.1:${PORT}`);
-    logger.info(`[ADDON] To install, use: ${APP_HOST}/manifest.json`);
 }
 
 startApiServer();

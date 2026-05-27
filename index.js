@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.3 – P2P fallback when no debrid + provider-aware caching
+// Version: 2.3 – Requires migrated DB (torrent_info_json column)
 
 import express from 'express';
 import cors from 'cors';
@@ -254,11 +254,9 @@ async function startAddonServer() {
         const meta = await getMetaDetails(imdbId, type);
         if (!meta) return { streams: [] };
 
-        // Bitmagnet search for fresh torrents
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
-        // Helper: map sorted matcher result to P2P stream objects
         const mapToP2PStreams = (sortedStreams) => {
             return sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
@@ -269,7 +267,6 @@ async function startAddonServer() {
             }));
         };
 
-        // Helper: map sorted matcher result to debrid stream objects (API URLs)
         const mapToDebridStreams = (sortedStreams) => {
             return sortedStreams.map(s => {
                 const prefix = s.isCached ? '⚡' : '⌛';
@@ -282,7 +279,6 @@ async function startAddonServer() {
             });
         };
 
-        // Determine cache rows based on debrid availability
         const cachedRows = debrid.isEnabled && DEBRID_PROVIDER
             ? (await pool.query(
                 "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
@@ -290,7 +286,6 @@ async function startAddonServer() {
             )).rows
             : [];
 
-        // --- MATCHING LOGIC (works for both modes) ---
         let resultStreams = [], cachedStreams = [];
 
         if (type === 'series') {
@@ -330,7 +325,7 @@ async function startAddonServer() {
                     }
                 }
             }
-        } else { // movie
+        } else {
             logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
             const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
             const movieResult = await matcher.findBestMovieStreams(
@@ -343,16 +338,12 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
-        // Build final stream list based on debrid availability
         const streams = [];
 
         if (debrid.isEnabled) {
-            // Debrid streams first (from sorted list, filtered to those with debrid behavior)
             streams.push(...mapToDebridStreams(sortedStreams));
-            // Append P2P fallback streams (all sorted entries)
             streams.push(...mapToP2PStreams(sortedStreams));
         } else {
-            // Only P2P streams
             streams.push(...mapToP2PStreams(sortedStreams));
         }
 

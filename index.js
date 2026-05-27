@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.3 – Requires migrated DB (torrent_info_json column)
+// Version: 2.4 – checkCached integration, P2P fileIdx fix, 451 terminal handling
 
 import express from 'express';
 import cors from 'cors';
@@ -53,7 +53,7 @@ async function startApiServer() {
                         logger.warn(`[API] Lock hit for ${infoHash}. Rejecting request due to previous failure.`);
                         throw lockEntry.error;
                 }
-            } else {
+            } else if (DEBRID_PROVIDER) {
                 const { rows } = await pool.query(
                     "SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
                     [infoHash, imdbId, type, DEBRID_PROVIDER]
@@ -97,7 +97,6 @@ async function startApiServer() {
                             for (let i = 0; i < maxPreChecks; i++) {
                                 await sleep(2000);
                                 const info = await debrid.getTorrentInfo(torrentId);
-
                                 if (!info) continue;
                                 if (['magnet_error', 'error', 'virus'].includes(info.status)) {
                                     throw new Error(`Debrid rejected the magnet (${info.status}).`);
@@ -129,21 +128,26 @@ async function startApiServer() {
                         );
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
-                        await pool.query(
-                            `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-                             ON CONFLICT (infohash, tmdb_id, content_type, provider)
-                             DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
-                            [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
-                        );
+                        if (DEBRID_PROVIDER) {
+                            await pool.query(
+                                `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
+                                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                                 ON CONFLICT (infohash, tmdb_id, content_type, provider)
+                                 DO UPDATE SET torrent_info_json = EXCLUDED.torrent_info_json, last_used_at = CURRENT_TIMESTAMP`,
+                                [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
+                            );
+                        }
 
                         resolve(readyTorrent);
                     } catch (error) {
                         const errMsg = error.message || '';
+                        const statusCode = error.response?.status;
+                        // ✅ Treat HTTP 451 (legal block) as terminal
                         const isTerminal = errMsg.includes('magnet_error') ||
                                            errMsg.includes('virus') ||
-                                           errMsg.includes('error') ||
-                                           errMsg.includes('rejected');
+                                           errMsg.includes('rejected') ||
+                                           statusCode === 451;
+
                         const isTimeout = errMsg.includes('timed out');
 
                         if (torrentId) {
@@ -193,8 +197,6 @@ async function startApiServer() {
 async function playFromReadyTorrent(res, readyTorrent, season, episode) {
     const { season: fallbackSeason } = robustParseInfo(readyTorrent.filename);
     const selectedFiles = readyTorrent.files.filter(file => file.selected === 1);
-    logger.debug(`[API-PLAYER] Original file count: ${readyTorrent.files.length}. Selected file count: ${selectedFiles.length}. Links count: ${readyTorrent.links.length}.`);
-
     const targetFileIndexInSelected = selectedFiles.findIndex(file => {
         const fileInfo = robustParseInfo(file.path, fallbackSeason);
         return fileInfo.season === parseInt(season, 10) && fileInfo.episode === parseInt(episode, 10);
@@ -202,9 +204,7 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
 
     let finalIndex = targetFileIndexInSelected;
     if (finalIndex === -1 && selectedFiles.length === 1) {
-        logger.info(`[API-PLAYER] No specific episode found, but it's a single selected file. Assuming it's the correct one.`);
-        const singleFile = selectedFiles[0];
-        const fileInfo = robustParseInfo(singleFile.path, fallbackSeason);
+        const fileInfo = robustParseInfo(selectedFiles[0].path, fallbackSeason);
         if (fileInfo.season === parseInt(season, 10) || fileInfo.season === undefined) {
             finalIndex = 0;
         }
@@ -214,16 +214,11 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
         throw new Error(`Could not find S${season}E${episode} in the torrent's selected file list.`);
     }
 
-    logger.info(`[API-PLAYER] Found S${season}E${episode} at index ${finalIndex} of the selected files.`);
     const linkToUnrestrict = readyTorrent.links[finalIndex];
-    if (!linkToUnrestrict) {
-        throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
-    }
+    if (!linkToUnrestrict) throw new Error(`Could not find a corresponding link at verified index ${finalIndex}.`);
 
     const unrestricted = await debrid.unrestrictLink(linkToUnrestrict);
-    if (!unrestricted) {
-        throw new Error('Failed to unrestrict link.');
-    }
+    if (!unrestricted) throw new Error('Failed to unrestrict link.');
     res.redirect(unrestricted.download);
 }
 
@@ -257,28 +252,29 @@ async function startAddonServer() {
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
-        const mapToP2PStreams = (sortedStreams) => {
-            return sortedStreams.map(s => ({
+        // --- P2P stream mapper (✅ fixed: use fileIndex) ---
+        const mapToP2PStreams = (sortedStreams) =>
+            sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                 title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
                 infoHash: s.infoHash,
-                fileIdx: s.fileIdx,
+                fileIdx: s.fileIndex,   // ✅ matcher uses fileIndex
                 behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
             }));
-        };
 
-        const mapToDebridStreams = (sortedStreams) => {
-            return sortedStreams.map(s => {
+        // --- Debrid stream mapper ---
+        const mapToDebridStreams = (sortedStreams) =>
+            sortedStreams.map(s => {
                 const prefix = s.isCached ? '⚡' : '⌛';
                 const url = `${APP_HOST}/${ADDON_ID}/stream/${type}/${id}/${s.infoHash}`;
                 return {
                     name: `[${prefix} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                     title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
-                    url: url,
+                    url,
                 };
             });
-        };
 
+        // --- DB‑cached rows (provider‑aware) ---
         const cachedRows = debrid.isEnabled && DEBRID_PROVIDER
             ? (await pool.query(
                 "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
@@ -286,30 +282,25 @@ async function startAddonServer() {
             )).rows
             : [];
 
+        // --- Matching ---
         let resultStreams = [], cachedStreams = [];
 
         if (type === 'series') {
             const sVal = parseInt(season, 10);
             const sPadded = sVal < 10 ? `S0${sVal}` : `S${sVal}`;
-
             const refinedQuery = `${meta.name} ${sPadded}`;
-            logger.info(`[ADDON] Attempting TARGETED search for: "${refinedQuery}"`);
-
             const refinedTorrents = await searchTorrents(refinedQuery, 'tv_show', 50);
             const refinedResult = await matcher.findBestSeriesStreams(
                 meta, parseInt(season), parseInt(episode), refinedTorrents, cachedRows, PREFERRED_LANGUAGES
             );
             resultStreams = refinedResult.streams;
             cachedStreams = refinedResult.cachedStreams;
-            logger.info(`[ADDON] Targeted search yielded ${refinedTorrents.length} raw hits and ${resultStreams.length} valid streams.`);
 
             if (refinedTorrents.length < 10 || resultStreams.length === 0) {
-                logger.info(`[ADDON] Search potentially weak. Falling back to BROAD search for "${meta.name}"...`);
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(
                     meta, parseInt(season), parseInt(episode), broadTorrents, cachedRows, PREFERRED_LANGUAGES
                 );
-
                 const existingHashes = new Set(resultStreams.map(s => s.infoHash));
                 for (const stream of broadResult.streams) {
                     if (!existingHashes.has(stream.infoHash)) {
@@ -326,7 +317,6 @@ async function startAddonServer() {
                 }
             }
         } else {
-            logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
             const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
             const movieResult = await matcher.findBestMovieStreams(
                 movieMetaForMatcher, torrents, cachedRows, PREFERRED_LANGUAGES
@@ -338,10 +328,34 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
-        const streams = [];
+        // ========== checkCached pre‑filter ==========
+        if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
+            const hashesToCheck = sortedStreams.map(s => s.infoHash);
+            if (hashesToCheck.length > 0) {
+                try {
+                    const cacheStatus = await debrid.checkCached(hashesToCheck);
+                    for (const s of sortedStreams) {
+                        const cs = cacheStatus[s.infoHash];
+                        if (cs && cs.cached) {
+                            s.isCached = true;
+                        } else {
+                            s.isCached = false;
+                        }
+                    }
+                } catch (err) {
+                    logger.warn(`checkCached failed, treating all as uncached: ${err.message}`);
+                    sortedStreams.forEach(s => s.isCached = false);
+                }
+            }
+        }
 
+        // Build final stream list
+        const streams = [];
         if (debrid.isEnabled) {
-            streams.push(...mapToDebridStreams(sortedStreams));
+            // Only debrid streams for cached torrents
+            const cachedSorted = sortedStreams.filter(s => s.isCached);
+            streams.push(...mapToDebridStreams(cachedSorted));
+            // P2P fallback for all
             streams.push(...mapToP2PStreams(sortedStreams));
         } else {
             streams.push(...mapToP2PStreams(sortedStreams));

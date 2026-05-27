@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.2 – Provider-aware torrents table + modular debrid
+// Version: 2.3 – P2P fallback when no debrid + provider-aware caching
 
 import express from 'express';
 import cors from 'cors';
@@ -54,7 +54,6 @@ async function startApiServer() {
                         throw lockEntry.error;
                 }
             } else {
-                // ✅ Provider-aware lookup
                 const { rows } = await pool.query(
                     "SELECT torrent_info_json FROM torrents WHERE infohash = $1 AND tmdb_id = $2 AND content_type = $3 AND provider = $4",
                     [infoHash, imdbId, type, DEBRID_PROVIDER]
@@ -130,7 +129,6 @@ async function startApiServer() {
                         );
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
-                        // ✅ Provider-aware insert
                         await pool.query(
                             `INSERT INTO torrents (infohash, tmdb_id, content_type, provider, torrent_info_json, language, quality, seeders)
                              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -246,21 +244,6 @@ async function startAddonServer() {
         const { type, id } = args;
         logger.info(`[ADDON] Stream request received for type: ${type}, id: ${id}`);
 
-        const mapToStreamObjects = (streams) => {
-            return streams.map(s => {
-                const prefix = s.isCached ? '⚡' : '⌛';
-                const sizeInfo = formatSize(s.size);
-                const title = `${s.torrentName}\n💾 ${sizeInfo} | 👤 ${s.seeders} seeders`;
-                const url = `${APP_HOST}/${ADDON_ID}/stream/${type}/${id}/${s.infoHash}`;
-
-                return {
-                    name: `[${prefix} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
-                    title: title,
-                    url: url
-                };
-            });
-        };
-
         let imdbId, season, episode;
         if (type === 'series') {
             [imdbId, season, episode] = id.split(':');
@@ -269,17 +252,47 @@ async function startAddonServer() {
         }
 
         const meta = await getMetaDetails(imdbId, type);
-        if (!meta) {
-            return { streams: [] };
-        }
+        if (!meta) return { streams: [] };
 
-        // ✅ Provider-aware retrieval of cached torrents
-        const { rows } = await pool.query(
-            "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
-            [imdbId, type, DEBRID_PROVIDER]
-        );
+        // Bitmagnet search for fresh torrents
+        const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
+        if (!torrents.length) return { streams: [] };
 
-        // --- MATCHING LOGIC (V3.2 Intelligence) ---
+        // Helper: map sorted matcher result to P2P stream objects
+        const mapToP2PStreams = (sortedStreams) => {
+            return sortedStreams.map(s => ({
+                name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
+                title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
+                infoHash: s.infoHash,
+                fileIdx: s.fileIdx,
+                behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
+            }));
+        };
+
+        // Helper: map sorted matcher result to debrid stream objects (API URLs)
+        const mapToDebridStreams = (sortedStreams) => {
+            return sortedStreams.map(s => {
+                const prefix = s.isCached ? '⚡' : '⌛';
+                const url = `${APP_HOST}/${ADDON_ID}/stream/${type}/${id}/${s.infoHash}`;
+                return {
+                    name: `[${prefix} RD] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
+                    title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
+                    url: url,
+                };
+            });
+        };
+
+        // Determine cache rows based on debrid availability
+        const cachedRows = debrid.isEnabled && DEBRID_PROVIDER
+            ? (await pool.query(
+                "SELECT * FROM torrents WHERE tmdb_id = $1 AND content_type = $2 AND torrent_info_json IS NOT NULL AND provider = $3",
+                [imdbId, type, DEBRID_PROVIDER]
+            )).rows
+            : [];
+
+        // --- MATCHING LOGIC (works for both modes) ---
+        let resultStreams = [], cachedStreams = [];
+
         if (type === 'series') {
             const sVal = parseInt(season, 10);
             const sPadded = sVal < 10 ? `S0${sVal}` : `S${sVal}`;
@@ -288,25 +301,18 @@ async function startAddonServer() {
             logger.info(`[ADDON] Attempting TARGETED search for: "${refinedQuery}"`);
 
             const refinedTorrents = await searchTorrents(refinedQuery, 'tv_show', 50);
-            let { streams: resultStreams, cachedStreams } = await matcher.findBestSeriesStreams(
-                meta,
-                parseInt(season),
-                parseInt(episode),
-                refinedTorrents,
-                rows,
-                PREFERRED_LANGUAGES
+            const refinedResult = await matcher.findBestSeriesStreams(
+                meta, parseInt(season), parseInt(episode), refinedTorrents, cachedRows, PREFERRED_LANGUAGES
             );
+            resultStreams = refinedResult.streams;
+            cachedStreams = refinedResult.cachedStreams;
+            logger.info(`[ADDON] Targeted search yielded ${refinedTorrents.length} raw hits and ${resultStreams.length} valid streams.`);
 
             if (refinedTorrents.length < 10 || resultStreams.length === 0) {
                 logger.info(`[ADDON] Search potentially weak. Falling back to BROAD search for "${meta.name}"...`);
                 const broadTorrents = await searchTorrents(meta.name, 'tv_show', 100);
                 const broadResult = await matcher.findBestSeriesStreams(
-                    meta,
-                    parseInt(season),
-                    parseInt(episode),
-                    broadTorrents,
-                    rows,
-                    PREFERRED_LANGUAGES
+                    meta, parseInt(season), parseInt(episode), broadTorrents, cachedRows, PREFERRED_LANGUAGES
                 );
 
                 const existingHashes = new Set(resultStreams.map(s => s.infoHash));
@@ -316,7 +322,6 @@ async function startAddonServer() {
                         existingHashes.add(stream.infoHash);
                     }
                 }
-
                 const existingCachedHashes = new Set(cachedStreams.map(s => s.infoHash));
                 for (const stream of broadResult.cachedStreams) {
                     if (!existingCachedHashes.has(stream.infoHash)) {
@@ -325,30 +330,38 @@ async function startAddonServer() {
                     }
                 }
             }
-
-            const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
-            return { streams: mapToStreamObjects(sortedStreams) };
-        }
-
-        if (type === 'movie') {
+        } else { // movie
             logger.info(`[ADDON] Attempting BROAD search for Movie: "${meta.name}"`);
-            const broadTorrents = await searchTorrents(meta.name, 'movie', 100);
             const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
-            const { streams, cachedStreams } = await matcher.findBestMovieStreams(
-                movieMetaForMatcher,
-                broadTorrents,
-                rows,
-                PREFERRED_LANGUAGES
+            const movieResult = await matcher.findBestMovieStreams(
+                movieMetaForMatcher, torrents, cachedRows, PREFERRED_LANGUAGES
             );
-
-            const sortedStreams = matcher.sortAndFilterStreams(streams, cachedStreams, PREFERRED_LANGUAGES);
-            return { streams: mapToStreamObjects(sortedStreams) };
+            resultStreams = movieResult.streams;
+            cachedStreams = movieResult.cachedStreams;
         }
 
-        return { streams: [] };
+        const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
+        logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
+
+        // Build final stream list based on debrid availability
+        const streams = [];
+
+        if (debrid.isEnabled) {
+            // Debrid streams first (from sorted list, filtered to those with debrid behavior)
+            streams.push(...mapToDebridStreams(sortedStreams));
+            // Append P2P fallback streams (all sorted entries)
+            streams.push(...mapToP2PStreams(sortedStreams));
+        } else {
+            // Only P2P streams
+            streams.push(...mapToP2PStreams(sortedStreams));
+        }
+
+        return { streams };
     });
 
     serveHTTP(builder.getInterface(), { port: PORT });
+    logger.info(`[ADDON] Stremio addon server listening on http://127.0.0.1:${PORT}`);
+    logger.info(`[ADDON] To install, use: ${APP_HOST}/manifest.json`);
 }
 
 startApiServer();

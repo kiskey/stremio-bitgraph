@@ -1,11 +1,11 @@
 // File: src/debrid/index.js
-// Version: 2.1 - Pluggable factory with cache injection
+// Version: 2.1 – Use logger (not log)
 
 import { debridService } from '../../config.js';
 import realdebrid from './realdebrid.js';
 import torbox from './torbox.js';
 import { createCache } from './cache.js';
-import { log } from '../utils.js';
+import { logger } from '../utils.js';
 
 const disabledProvider = {
   isEnabled: false,
@@ -22,32 +22,31 @@ let instance = null;
 
 function loadProvider() {
   if (!debridService) {
-    log('info', 'No debrid service configured – P2P only.');
+    logger.info('No debrid service configured – P2P only.');
     return disabledProvider;
   }
 
   switch (debridService.toLowerCase()) {
     case 'realdebrid':
       if (!realdebrid.isEnabled) {
-        log('warn', 'Real-Debrid API key missing, P2P only.');
+        logger.warn('Real-Debrid API key missing, P2P only.');
         return disabledProvider;
       }
-      log('info', 'Using Real-Debrid provider');
+      logger.info('Using Real-Debrid provider');
       return realdebrid;
 
     case 'torbox':
       if (!torbox.isEnabled) {
-        log('warn', 'TorBox API key missing, P2P only.');
+        logger.warn('TorBox API key missing, P2P only.');
         return disabledProvider;
       }
-      // ✅ Inject the generic cache
       const cache = createCache('torbox');
       torbox.setup(cache);
-      log('info', 'Using TorBox provider with cache');
+      logger.info('Using TorBox provider with cache');
       return torbox;
 
     default:
-      log('warn', `Unknown debrid service: ${debridService}, P2P only.`);
+      logger.warn(`Unknown debrid service: ${debridService}, P2P only.`);
       return disabledProvider;
   }
 }
@@ -61,7 +60,6 @@ const handler = {
       if (typeof instance.checkCached === 'function') {
         return instance.checkCached.bind(instance);
       }
-      // Fallback: all false
       return async (hashes) => {
         const result = {};
         for (const hash of hashes) result[hash] = false;

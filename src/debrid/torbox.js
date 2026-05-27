@@ -1,5 +1,5 @@
 // File: src/debrid/torbox.js
-// Version: 2.1 – Use logger (not log)
+// Version: 2.2 – attach setup to torbox object
 
 import axios from 'axios';
 import { TORBOX_API_KEY, TORBOX_MAX_ACTIVE_TORRENTS } from '../../config.js';
@@ -8,6 +8,7 @@ import { logger } from '../utils.js';
 const BASE_URL = 'https://api.torbox.app/v1';
 const apiKey = TORBOX_API_KEY;
 
+// Deduplication and rate-limiting
 const activeAdds = new Map();
 const RATE_LIMIT_WINDOW = 2000;
 let lastAddTime = 0;
@@ -21,7 +22,8 @@ class ResourceNotFoundError extends Error {
 
 let cache = null;
 
-export function setup(cacheInstance) {
+// Module-level setup function
+function setup(cacheInstance) {
   cache = cacheInstance;
 }
 
@@ -31,6 +33,9 @@ function _extractHash(magnet) {
 }
 
 const torbox = {
+  // Attach the setup function to the object
+  setup,
+
   isEnabled: !!apiKey,
 
   async _request(method, path, data = null, headers = {}) {

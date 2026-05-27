@@ -1,5 +1,5 @@
 // File: src/debrid/torbox.js
-// Version: 3.0 – Verified TorBox API endpoints, rate‑limiting, dedup, slot management
+// Version: 3.1 – Verified endpoints + proper debug logging
 
 import axios from 'axios';
 import FormData from 'form-data';
@@ -9,7 +9,6 @@ import { logger } from '../utils.js';
 const BASE_URL = 'https://api.torbox.app/v1/api';
 const apiKey = TORBOX_API_KEY;
 
-// ── Custom Error ─────────────────────────────────────────────────
 class ResourceNotFoundError extends Error {
   constructor(message = 'TorBox resource not found') {
     super(message);
@@ -17,33 +16,26 @@ class ResourceNotFoundError extends Error {
   }
 }
 
-// ── Cache (injected by factory) ─────────────────────────────────
 let cache = null;
 
 export function setup(cacheInstance) {
   cache = cacheInstance;
 }
 
-// ── In‑Memory Helpers ────────────────────────────────────────────
-const torrentSelections = new Map();   // torrentId → Set of real file IDs
-const recentMagnetAdds = new Map();    // infoHash → { timestamp, torrentId }
-const addMagnetTimestamps = [];       // rate‑limit tracking
+const torrentSelections = new Map();
+const recentMagnetAdds = new Map();
+const addMagnetTimestamps = [];
 const MAX_ADDS_PER_MINUTE = 8;
 const ADD_COOLDOWN_MS = 60_000;
 const DEDUP_WINDOW_MS = 30_000;
-const RATE_LIMIT_WINDOW = 2000;       // kept for backward compat but overridden by token‑bucket
 
-// ── Helper: extract info hash ────────────────────────────────────
 function extractInfoHash(magnet) {
   const m = magnet.match(/btih:([a-fA-F0-9]{40})/);
   return m ? m[1].toLowerCase() : null;
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-// ── Rate‑Limiting (token bucket style, as in model) ──────────────
 function checkAddMagnetRateLimit() {
   const now = Date.now();
   while (addMagnetTimestamps.length > 0 && addMagnetTimestamps[0] < now - ADD_COOLDOWN_MS) {
@@ -54,7 +46,6 @@ function checkAddMagnetRateLimit() {
   return true;
 }
 
-// ── Active Slot Management ───────────────────────────────────────
 const ACTIVE_STATES = new Set([
   'downloading', 'metadl', 'checkingresumedata',
   'stalled (no seeds)', 'uploading', 'seeding'
@@ -74,14 +65,14 @@ async function getActiveTorrentCount() {
     const stale = active.filter(t => STALE_STATES.has((t.status || '').toLowerCase()));
     return { count: active.length, staleList: stale.map(t => t.id) };
   } catch (e) {
-    logger.warn({ err: e.message }, 'Failed to count active torrents.');
+    logger.warn(`Failed to count active torrents: ${e.message}`);
     return { count: -1, staleList: [] };
   }
 }
 
 async function deleteTorrentFromProvider(torrentId) {
   try {
-    logger.info({ torrentId }, 'Deleting torrent from TorBox...');
+    logger.info(`Deleting torrent ${torrentId} from TorBox...`);
     const form = new FormData();
     form.append('id', torrentId);
     form.append('action', 'delete');
@@ -90,7 +81,7 @@ async function deleteTorrentFromProvider(torrentId) {
     });
     return true;
   } catch (error) {
-    logger.warn({ torrentId, err: error.message }, 'Failed to delete torrent from TorBox.');
+    logger.warn(`Failed to delete torrent ${torrentId}: ${error.message}`);
     return false;
   }
 }
@@ -102,13 +93,12 @@ async function cleanupStaleActiveTorrents(maxActive) {
   const needToRemove = count - maxActive + 1;
   const toRemove = staleList.slice(0, Math.min(needToRemove, staleList.length));
   if (toRemove.length === 0) {
-    logger.warn({ activeCount: count, maxActive }, 'All active torrent slots full, no stale ones.');
+    logger.warn(`Active torrent count=${count}, max=${maxActive}, but no stale torrents to remove.`);
     return;
   }
-  logger.info({ activeCount: count, maxActive, removing: toRemove }, 'Cleaning stale active torrents.');
+  logger.info(`Cleaning ${toRemove.length} stale active torrents to stay under max ${maxActive}.`);
   for (const id of toRemove) {
     await deleteTorrentFromProvider(id);
-    // remove mapping
     if (cache) {
       const row = await cache.getByProviderId(id);
       if (row) await cache.update(row.hash, { status: 'deleted' });
@@ -116,8 +106,8 @@ async function cleanupStaleActiveTorrents(maxActive) {
   }
 }
 
-// ── Fetch full torrent info (via mylist? id=) ────────────────────
 async function fetchFullTorrentInfo(torrentId) {
+  logger.debug(`Fetching full torrent info for ${torrentId} from mylist? id=...`);
   const { data } = await axios.get(`${BASE_URL}/torrents/mylist`, {
     headers: { Authorization: `Bearer ${apiKey}` },
     params: { id: torrentId },
@@ -128,7 +118,6 @@ async function fetchFullTorrentInfo(torrentId) {
   return item;
 }
 
-// ── Map status ───────────────────────────────────────────────────
 function mapStatus(tbStatus) {
   const s = (tbStatus || '').toLowerCase();
   if (['completed', 'cached', 'uploading', 'seeding', 'active', 'downloaded'].includes(s)) return 'downloaded';
@@ -137,49 +126,45 @@ function mapStatus(tbStatus) {
   return 'downloading';
 }
 
-// ── The Provider Object ──────────────────────────────────────────
 const torbox = {
-  setup,                     // ← must be attached
+  setup,
   isEnabled: !!apiKey,
 
-  // ── 1. addMagnet ──────────────────────────────────────────────
+  // 1. addMagnet
   async addMagnet(magnet) {
     const infohash = extractInfoHash(magnet);
     if (!infohash) throw new Error('Invalid magnet link');
 
-    // Deduplicate recent additions
     if (infohash && recentMagnetAdds.has(infohash)) {
       const prev = recentMagnetAdds.get(infohash);
       if (Date.now() - prev.timestamp < DEDUP_WINDOW_MS) {
-        logger.info({ infohash, torrentId: prev.torrentId }, 'Torrent recently added, reusing ID.');
+        logger.debug(`Reusing recently added torrent for ${infohash} (torrentId=${prev.torrentId})`);
         return { id: prev.torrentId, hash: infohash, cached: true };
       }
     }
 
-    // Rate limit
     if (!checkAddMagnetRateLimit()) {
       logger.warn('addMagnet rate limit exceeded.');
       throw new Error('TorBox addMagnet rate limit exceeded. Please wait.');
     }
 
-    // Active slot management
     const maxActive = TORBOX_MAX_ACTIVE_TORRENTS || 0;
     if (maxActive > 0) {
       await cleanupStaleActiveTorrents(maxActive);
     }
 
-    // Check local cache for existing mapping
     if (cache) {
       const cached = await cache.get(infohash);
       if (cached && cached.provider_torrent_id) {
         try {
+          logger.debug(`Cache hit for ${infohash} -> torrentId ${cached.provider_torrent_id}, checking if still active.`);
           const info = await this.getTorrentInfo(cached.provider_torrent_id);
           return { id: cached.provider_torrent_id, hash: infohash, cached: true, ...info };
-        } catch (e) { /* stale, will add fresh */ }
+        } catch (e) { /* stale */ }
       }
     }
 
-    // Retry loop
+    logger.info(`Adding magnet to TorBox (hash=${infohash})...`);
     let lastError = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -188,20 +173,21 @@ const torbox = {
         const response = await axios.post(`${BASE_URL}/torrents/createtorrent`, form, {
           headers: { ...form.getHeaders(), Authorization: `Bearer ${apiKey}` },
         });
+        logger.debug(`createtorrent response: ${JSON.stringify(response.data).slice(0, 200)}`);
         const payload = response.data.data || response.data;
         const torrentId = payload.torrent_id || payload.id;
         const hash = payload.hash;
         const isCachedTorrent = (response.data.detail || '').toLowerCase().includes('cached torrent');
 
         if (torrentId && hash) {
-          // Save mapping
           if (cache) {
             await cache.set(hash, { provider_torrent_id: torrentId, status: 'active', extra: {} });
           }
           if (infohash) recentMagnetAdds.set(infohash, { timestamp: Date.now(), torrentId });
+          logger.info(`Magnet added: id=${torrentId}, cached=${isCachedTorrent}`);
           return { id: torrentId, hash, name: payload.name, cached: isCachedTorrent, ...payload };
         }
-        logger.error({ rawResponse: JSON.stringify(response.data) }, 'Missing id/hash in createtorrent response.');
+        logger.error('Missing id/hash in createtorrent response.');
         lastError = new Error('addMagnet response missing id/hash');
         break;
       } catch (error) {
@@ -217,16 +203,17 @@ const torbox = {
     throw lastError || new Error('Failed to add magnet to TorBox.');
   },
 
-  // ── 2. getTorrentInfo (full info, real file IDs) ──────────────
+  // 2. getTorrentInfo
   async getTorrentInfo(id) {
     try {
+      logger.debug(`getTorrentInfo(${id})`);
       const torrent = await fetchFullTorrentInfo(id);
       const rawStatus = torrent.download_state || torrent.status || 'MISSING';
       const tbStatus = mapStatus(rawStatus);
 
       const selectedSet = torrentSelections.get(id) || new Set();
       const files = (torrent.files || []).map(f => ({
-        id: f.id,                  // real file ID from TorBox
+        id: f.id,
         path: f.name,
         bytes: f.size,
         selected: selectedSet.size === 0 || selectedSet.has(f.id) ? 1 : 0,
@@ -234,7 +221,7 @@ const torbox = {
 
       const links = [];
       if (tbStatus === 'downloaded' && torrent.files) {
-        torrent.files.forEach(() => links.push(null));  // placeholders – real links obtained via unrestrictLink
+        torrent.files.forEach(() => links.push(null));
       }
 
       return { id, filename: torrent.name, status: tbStatus, files, links };
@@ -245,9 +232,10 @@ const torbox = {
     }
   },
 
-  // ── 3. selectFiles (in‑memory) ─────────────────────────────────
+  // 3. selectFiles
   async selectFiles(id, fileIds = 'all') {
     try {
+      logger.debug(`selectFiles(${id}, ${JSON.stringify(fileIds)})`);
       const torrent = await fetchFullTorrentInfo(id);
       if (fileIds === 'all') {
         const allIds = (torrent.files || []).map(f => f.id);
@@ -265,7 +253,7 @@ const torbox = {
     }
   },
 
-  // ── 4. unrestrictLink (TorBox direct links are ready) ──────────
+  // 4. unrestrictLink
   async unrestrictLink(link) {
     if (link && (link.startsWith('http://') || link.startsWith('https://'))) {
       return { download: link };
@@ -273,7 +261,7 @@ const torbox = {
     throw new Error('TorBox does not support hoster link unrestriction.');
   },
 
-  // ── 5. addAndSelect ────────────────────────────────────────────
+  // 5. addAndSelect
   async addAndSelect(magnet) {
     const addRes = await this.addMagnet(magnet);
     const torrentId = addRes.id;
@@ -284,8 +272,9 @@ const torbox = {
     return null;
   },
 
-  // ── 6. deleteTorrent ──────────────────────────────────────────
+  // 6. deleteTorrent
   async deleteTorrent(id) {
+    logger.info(`deleteTorrent(${id})`);
     await deleteTorrentFromProvider(id);
     if (cache) {
       const row = await cache.getByProviderId(id);
@@ -293,8 +282,9 @@ const torbox = {
     }
   },
 
-  // ── 7. getTorrents (list all active torrents) ──────────────────
+  // 7. getTorrents (list active)
   async getTorrents() {
+    logger.debug('Fetching active torrent list from TorBox...');
     const { data } = await axios.get(`${BASE_URL}/torrents/mylist`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -308,11 +298,12 @@ const torbox = {
     }));
   },
 
-  // ── 8. checkCached (native endpoint) ───────────────────────────
+  // 8. checkCached
   async checkCached(hashes) {
     if (!Array.isArray(hashes) || hashes.length === 0) return {};
     const body = { hashes };
     const params = { format: 'object', list_files: true };
+    logger.debug(`checkCached request: ${JSON.stringify(body)}`);
     try {
       const response = await axios.post(`${BASE_URL}/torrents/checkcached`, body, {
         headers: { Authorization: `Bearer ${apiKey}` },
@@ -334,17 +325,17 @@ const torbox = {
         }
       }
       const cachedCount = Object.values(result).filter(v => v.cached).length;
-      logger.info({ hashCount: hashes.length, cachedCount }, 'TorBox checkCached result');
+      logger.info(`checkCached: ${cachedCount}/${hashes.length} cached.`);
       return result;
     } catch (err) {
-      logger.error({ err: err.message }, 'checkCached failed');
+      logger.error(`checkCached failed: ${err.message}`);
       const empty = {};
       hashes.forEach(h => empty[h] = { cached: false, files: [] });
       return empty;
     }
   },
 
-  // ── 9. getCachedFileInfo (by hash & fileName) ──────────────────
+  // 9. getCachedFileInfo
   async getCachedFileInfo(hash, fileName) {
     const cacheResult = await this.checkCached([hash]);
     const info = cacheResult[hash];
@@ -360,9 +351,10 @@ const torbox = {
     };
   },
 
-  // ── 10. getDownloadLinkForFile ─────────────────────────────────
+  // 10. getDownloadLinkForFile
   async getDownloadLinkForFile(torrentId, fileId) {
     try {
+      logger.debug(`Requesting download link for torrent ${torrentId} file ${fileId}`);
       const { data } = await axios.get(`${BASE_URL}/torrents/requestdl`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         params: { token: apiKey, torrent_id: torrentId, file_id: fileId, redirect: false },
@@ -370,7 +362,7 @@ const torbox = {
       const payload = data.data || data;
       return payload.url || payload;
     } catch (err) {
-      logger.error({ torrentId, fileId, err: err.message }, 'Failed to get download link.');
+      logger.error(`getDownloadLinkForFile failed: ${err.message}`);
       return null;
     }
   },

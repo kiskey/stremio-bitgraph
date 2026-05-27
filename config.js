@@ -28,7 +28,7 @@ export const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD)
 export const STRICT_LANGUAGE_FILTER = process.env.STRICT_LANGUAGE_FILTER === 'true';
 export const STREAM_LIMIT_PER_QUALITY = parseInt(process.env.STREAM_LIMIT_PER_QUALITY) || 2;
 
-// ================== NEW: Modular Debrid Configuration ==================
+// ================== Modular Debrid Configuration ==================
 export const DEBRID_SERVICE = (process.env.DEBRID_SERVICE || '').toLowerCase() || null;
 
 export const TORBOX_API_KEY = process.env.TORBOX_API_KEY || null;
@@ -43,19 +43,19 @@ if (!debridService) {
   if (REALDEBRID_ENABLED) debridService = 'realdebrid';
   else if (TORBOX_ENABLED) debridService = 'torbox';
 }
+
+// Stable alias for use in queries
+export const DEBRID_PROVIDER = debridService;
+
 // Cache table name (for generic debrid mapping)
 export const DEBRID_CACHE_TABLE = process.env.DEBRID_CACHE_TABLE || 'debrid_cache';
 
-// ================== Validation (modified) ==================
-// We still need TMDB, Bitmagnet and DB, but the debrid key is mandatory only if
-// no debrid service is set. (If neither RD nor TorBox is provided, the addon
-// will still work in pure P2P mode.)
+// ================== Validation ==================
 const missing = [];
 if (!TMDB_API_KEY) missing.push('TMDB_API_KEY');
 if (!BITMAGNET_GRAPHQL_ENDPOINT) missing.push('BITMAGNET_GRAPHQL_ENDPOINT');
 if (!DATABASE_URL) missing.push('DATABASE_URL');
 
-// Warn if a debrid service is selected but the corresponding key is missing
 if (debridService === 'realdebrid' && !REALDEBRID_API_KEY) {
   console.warn('DEBRID_SERVICE set to realdebrid but REALDEBRID_API_KEY is missing. Falling back to P2P only.');
 }

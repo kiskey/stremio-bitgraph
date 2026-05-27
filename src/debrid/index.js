@@ -1,12 +1,12 @@
 // File: src/debrid/index.js
-// Version: 1.0 - Debrid provider factory
+// Version: 2.1 - Pluggable factory with cache injection
 
 import { debridService } from '../../config.js';
 import realdebrid from './realdebrid.js';
 import torbox from './torbox.js';
+import { createCache } from './cache.js';
 import { log } from '../utils.js';
 
-// Disabled (no‑op) provider
 const disabledProvider = {
   isEnabled: false,
   async addMagnet() { throw new Error('Debrid not configured'); },
@@ -22,26 +22,32 @@ let instance = null;
 
 function loadProvider() {
   if (!debridService) {
-    log('info', 'No debrid service configured. P2P only mode.');
+    log('info', 'No debrid service configured – P2P only.');
     return disabledProvider;
   }
+
   switch (debridService.toLowerCase()) {
     case 'realdebrid':
       if (!realdebrid.isEnabled) {
-        log('warn', 'Real-Debrid API key missing, falling back to P2P');
+        log('warn', 'Real-Debrid API key missing, P2P only.');
         return disabledProvider;
       }
       log('info', 'Using Real-Debrid provider');
       return realdebrid;
+
     case 'torbox':
       if (!torbox.isEnabled) {
-        log('warn', 'TorBox API key missing, falling back to P2P');
+        log('warn', 'TorBox API key missing, P2P only.');
         return disabledProvider;
       }
-      log('info', 'Using TorBox provider');
+      // ✅ Inject the generic cache
+      const cache = createCache('torbox');
+      torbox.setup(cache);
+      log('info', 'Using TorBox provider with cache');
       return torbox;
+
     default:
-      log('warn', `Unknown debrid service: ${debridService}. P2P only.`);
+      log('warn', `Unknown debrid service: ${debridService}, P2P only.`);
       return disabledProvider;
   }
 }
@@ -51,27 +57,20 @@ const handler = {
     if (!instance) {
       instance = loadProvider();
     }
-    // Ensure checkCached is available; if provider doesn't have it, provide a fallback
     if (prop === 'checkCached') {
       if (typeof instance.checkCached === 'function') {
-        return (...args) => instance.checkCached(...args);
+        return instance.checkCached.bind(instance);
       }
-      // Fallback: return all false
+      // Fallback: all false
       return async (hashes) => {
         const result = {};
-        for (const hash of hashes) {
-          result[hash] = false;
-        }
+        for (const hash of hashes) result[hash] = false;
         return result;
       };
     }
-    if (prop in instance) {
-      return instance[prop];
-    }
-    return undefined;
+    return instance[prop];
   }
 };
 
 const debridProxy = new Proxy({}, handler);
-
 export default debridProxy;

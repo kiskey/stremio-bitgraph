@@ -1,10 +1,16 @@
 name: Docker Build & Push
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  #  push:
+  #    branches: [ "main" ]
+  #  pull_request:
+  #    branches: [ "main" ]
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional custom image tag (e.g., v1.2.3) — overrides auto-tagging
+        required: false
 
 jobs:
   build:
@@ -34,4 +40,6 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ghcr.io/${{ github.repository }}:${{ GITHUB.SHA }}, ghcr.io/${{ github.repository }}:latest
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ inputs.tag || github.sha }}
+            ghcr.io/${{ github.repository }}:latest

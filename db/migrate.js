@@ -1,5 +1,5 @@
 // File: db/migrate.js
-// Version: 2.1 – Provider-aware torrents table + generic debrid cache
+// Version: 2.2 – Adds provider column and renames info column if necessary
 
 import pg from 'pg';
 import { DATABASE_URL } from '../config.js';
@@ -9,7 +9,7 @@ const pool = new pg.Pool({ connectionString: DATABASE_URL });
 async function migrate() {
   const client = await pool.connect();
   try {
-    // 1. Debrid cache table
+    // 1. Create debrid_cache table
     await client.query(`
       CREATE TABLE IF NOT EXISTS debrid_cache (
         id SERIAL PRIMARY KEY,
@@ -26,9 +26,13 @@ async function migrate() {
     `);
 
     // 2. Make torrents table provider-aware
+    // Add provider column if missing
     await client.query(`
       ALTER TABLE torrents ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'realdebrid';
+    `);
 
+    // Rename rd_torrent_info_json to torrent_info_json (if old column exists)
+    await client.query(`
       DO $$
       BEGIN
         IF EXISTS (
@@ -38,7 +42,10 @@ async function migrate() {
           ALTER TABLE torrents RENAME COLUMN rd_torrent_info_json TO torrent_info_json;
         END IF;
       END $$;
+    `);
 
+    // Drop old constraint and add new one with provider
+    await client.query(`
       ALTER TABLE torrents DROP CONSTRAINT IF EXISTS torrents_infohash_tmdb_id_content_type_key;
       ALTER TABLE torrents ADD CONSTRAINT torrents_infohash_tmdb_id_content_type_provider_key
         UNIQUE (infohash, tmdb_id, content_type, provider);

@@ -1,5 +1,5 @@
 // File: src/debrid/index.js
-// Version: 2.1 – Use logger (not log)
+// Version: 2.2 – guard for setup
 
 import { debridService } from '../../config.js';
 import realdebrid from './realdebrid.js';
@@ -40,9 +40,14 @@ function loadProvider() {
         logger.warn('TorBox API key missing, P2P only.');
         return disabledProvider;
       }
-      const cache = createCache('torbox');
-      torbox.setup(cache);
-      logger.info('Using TorBox provider with cache');
+      // Inject cache if setup is available
+      if (typeof torbox.setup === 'function') {
+        const cache = createCache('torbox');
+        torbox.setup(cache);
+        logger.info('Using TorBox provider with cache');
+      } else {
+        logger.warn('TorBox provider missing setup, running without cache.');
+      }
       return torbox;
 
     default:

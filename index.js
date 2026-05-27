@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.9.1 – P2P fallback fileIdx default for movies + debrid acceleration
+// Version: 2.9.2 – Movie P2P: determine fileIdx by largest video file (like series pack)
 
 import express from 'express';
 import cors from 'cors';
@@ -11,7 +11,7 @@ import { PORT, API_PORT, APP_HOST, ADDON_ID, PREFERRED_LANGUAGES, DEBRID_PROVIDE
 import { initDb, pool } from './db.js';
 import { logger, getQuality, formatSize, robustParseInfo, sleep } from './src/utils.js';
 import { getMetaDetails } from './src/metadata.js';
-import { searchTorrents } from './src/bitmagnet.js';
+import { searchTorrents, getTorrentFiles } from './src/bitmagnet.js';
 import * as matcher from './src/matcher.js';
 import PTT from 'parse-torrent-title';
 
@@ -274,13 +274,13 @@ async function startAddonServer() {
         const torrents = await searchTorrents(meta.name, type === 'series' ? 'tv_show' : 'movie', 100);
         if (!torrents.length) return { streams: [] };
 
-        // ✅ P2P stream mapper with safe fileIdx default
+        // P2P stream mapper – fileIdx will be guaranteed after file-index fix block
         const mapToP2PStreams = (sortedStreams) =>
             sortedStreams.map(s => ({
                 name: `[Bitgraph P2P] ${s.language.toUpperCase()} | ${s.quality.toUpperCase()}`,
                 title: `${s.torrentName}\n💾 ${formatSize(s.size)} | 👤 ${s.seeders} seeders`,
                 infoHash: s.infoHash,
-                fileIdx: s.fileIndex ?? 0,   // fallback to 0 for movies or any missing index
+                fileIdx: s.fileIndex ?? 0,   // fallback only if completely missing
                 behaviorHints: { notWebReady: true, bingeGroup: type === 'series' ? imdbId : undefined },
             }));
 
@@ -335,7 +335,7 @@ async function startAddonServer() {
                     }
                 }
             }
-        } else {
+        } else { // movie
             const movieMetaForMatcher = { title: meta.name, release_date: meta.year ? `${meta.year}-01-01` : null };
             const movieResult = await matcher.findBestMovieStreams(
                 movieMetaForMatcher, torrents, cachedRows, PREFERRED_LANGUAGES
@@ -347,6 +347,7 @@ async function startAddonServer() {
         const sortedStreams = matcher.sortAndFilterStreams(resultStreams, cachedStreams, PREFERRED_LANGUAGES);
         logger.info(`[ADDON] Total sorted streams: ${sortedStreams.length}`);
 
+        // --- checkCached + in‑memory cache for TorBox (unchanged) ---
         if (debrid.isEnabled && typeof debrid.checkCached === 'function') {
             const hashesToCheck = sortedStreams.map(s => s.infoHash);
             if (hashesToCheck.length > 0) {
@@ -388,6 +389,37 @@ async function startAddonServer() {
             }
         }
 
+        // ========== NEW: Fix missing fileIndex for movies (P2P) ==========
+        // Ensure every movie stream has a valid fileIndex by picking the largest video file
+        const torrentMap = new Map(torrents.map(t => [t.infoHash, t.torrent]));
+        for (const stream of sortedStreams) {
+            if (stream.fileIndex === undefined) {
+                const torrentData = torrentMap.get(stream.infoHash);
+                if (torrentData && torrentData.filesStatus === 'multi') {
+                    try {
+                        const files = await getTorrentFiles(stream.infoHash);
+                        if (files && files.length > 0) {
+                            const videoFiles = files.filter(f => f.fileType === 'video');
+                            if (videoFiles.length > 0) {
+                                const largest = videoFiles.reduce((a, b) => (a.size > b.size ? a : b));
+                                stream.fileIndex = largest.index;
+                            } else {
+                                stream.fileIndex = 0; // fallback
+                            }
+                        } else {
+                            stream.fileIndex = 0;
+                        }
+                    } catch (err) {
+                        stream.fileIndex = 0; // failed to fetch, fallback
+                    }
+                } else {
+                    // Single file or unknown – index 0 is safe
+                    stream.fileIndex = 0;
+                }
+            }
+        }
+
+        // Build final stream list
         const streams = [];
         if (debrid.isEnabled) {
             const cachedSorted = sortedStreams.filter(s => s.isCached);

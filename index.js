@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.9.10 – Terminal detection for ResourceNotFoundError
+// Version: 2.9.11 – Hardened pre‑selection loop against transient 404s
 
 import express from 'express';
 import cors from 'cors';
@@ -126,12 +126,23 @@ async function startApiServer() {
 
                             const isCached = addResult.cached === true;
                             if (!isCached) {
+                                // Standard pre‑selection loop for non‑cached torrents
                                 logger.info(`[API] Torrent added (ID: ${torrentId}). Waiting for metadata...`);
                                 let readyForSelection = false;
                                 const maxPreChecks = 10;
                                 for (let i = 0; i < maxPreChecks; i++) {
                                     await sleep(2000);
-                                    const info = await debrid.getTorrentInfo(torrentId);
+                                    let info;
+                                    try {
+                                        info = await debrid.getTorrentInfo(torrentId);
+                                    } catch (err) {
+                                        // ✅ Safe catch: transient 404 (torrent not yet processed) is not a terminal error
+                                        if (err.name === 'ResourceNotFoundError') {
+                                            logger.warn(`[API] Torrent ${torrentId} returned 404 – still processing (attempt ${i+1}/${maxPreChecks}).`);
+                                            continue;
+                                        }
+                                        throw err; // other errors propagate
+                                    }
                                     if (!info) continue;
                                     if (['magnet_error', 'error', 'virus'].includes(info.status)) {
                                         throw new Error(`Debrid rejected the magnet (${info.status}).`);
@@ -140,11 +151,13 @@ async function startApiServer() {
                                         readyForSelection = true;
                                         break;
                                     }
+                                    logger.debug(`[API] Torrent ${torrentId} status: ${info.status}`);
                                 }
                                 if (!readyForSelection) {
                                     throw new Error('Timed out waiting for debrid to convert magnet metadata.');
                                 }
 
+                                // Select all files
                                 const freshInfo = await debrid.getTorrentInfo(torrentId);
                                 if (freshInfo && freshInfo.status === 'waiting_files_selection') {
                                     const fileIds = freshInfo.files.map((_, idx) => idx);
@@ -179,7 +192,7 @@ async function startApiServer() {
                                            errMsg.includes('virus') ||
                                            errMsg.includes('rejected') ||
                                            statusCode === 451 ||
-                                           error.name === 'ResourceNotFoundError';   // ✅ terminal
+                                           error.name === 'ResourceNotFoundError';
 
                         const isTimeout = errMsg.includes('timed out');
 

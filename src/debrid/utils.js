@@ -1,5 +1,5 @@
 // File: src/debrid/utils.js
-// Version: 2.0 – Null-safe polling, handles transient 404s
+// Version: 2.1 – Timeout message includes "timed out", increased max attempts
 
 import { logger } from '../utils.js';
 
@@ -8,7 +8,7 @@ export function sleep(ms) {
 }
 
 export async function pollTorrentUntilReady(torrentId, getInfoFn, options = {}) {
-  const maxAttempts = options.maxAttempts || 60;
+  const maxAttempts = options.maxAttempts || 90;   // ~3 minutes
   const intervalMs = options.intervalMs || 2000;
   const readyStatuses = ['downloaded', 'finished'];
 
@@ -17,17 +17,15 @@ export async function pollTorrentUntilReady(torrentId, getInfoFn, options = {}) 
     try {
       info = await getInfoFn(torrentId);
     } catch (err) {
-      // If the provider throws a ResourceNotFoundError, treat as not ready yet
       if (err.name === 'ResourceNotFoundError') {
         logger.warn(`[POLL] 404 for ${torrentId} (attempt ${attempt+1}/${maxAttempts}) – waiting...`);
         await sleep(intervalMs);
         continue;
       }
-      throw err;  // other errors propagate
+      throw err;
     }
 
     if (!info) {
-      // Provider returned null (transient error) – treat same as not ready
       logger.warn(`[POLL] null info for ${torrentId} (attempt ${attempt+1}/${maxAttempts}) – waiting...`);
       await sleep(intervalMs);
       continue;
@@ -43,5 +41,6 @@ export async function pollTorrentUntilReady(torrentId, getInfoFn, options = {}) 
     await sleep(intervalMs);
   }
 
-  throw new Error(`Torrent ${torrentId} did not reach ready state after ${maxAttempts} attempts`);
+  // ✅ This error message is now caught by the "isTimeout" check
+  throw new Error(`Torrent ${torrentId} polling timed out after ${maxAttempts} attempts`);
 }

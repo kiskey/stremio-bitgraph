@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.9.8 – Atomic processing lock, cached TorBox fast‑path, hardened error handling
+// Version: 2.9.9 – Safe lock promises (no unhandled rejections), all v2.9.8 improvements
 
 import express from 'express';
 import cors from 'cors';
@@ -93,6 +93,8 @@ async function startApiServer() {
                     resolveLock = res;
                     rejectLock = rej;
                 });
+                // Prevent unhandled rejection – the promise is only used internally
+                lockPromise.catch(() => {});
                 processingLock.set(infoHash, { state: 'PROCESSING', promise: lockPromise });
 
                 // Wrap the entire process so we can resolve/reject the lock
@@ -194,7 +196,11 @@ async function startApiServer() {
                                 logger.info(`[API] Timeout for ${torrentId} – keeping torrent for retry.`);
                             } else {
                                 logger.warn(`[API] Unknown error for ${torrentId}: ${errMsg}. Deleting to avoid zombie state.`);
-                                await debrid.deleteTorrent(torrentId);
+                                try {
+                                    await debrid.deleteTorrent(torrentId);
+                                } catch (cleanupErr) {
+                                    logger.warn(`[API] Cleanup failed for ${torrentId}: ${cleanupErr.message}`);
+                                }
                             }
                         }
                         throw error;
@@ -206,13 +212,11 @@ async function startApiServer() {
                     torrentInfo = await processPromise;
                     processingLock.set(infoHash, { state: 'COMPLETED', data: torrentInfo });
                     resolveLock(torrentInfo);
-                    // Auto‑clear after 30 sec to free memory
                     setTimeout(() => processingLock.delete(infoHash), 30000);
                 } catch (error) {
                     logger.error(`[API] Processing failed for ${infoHash}: ${error.message}`);
                     processingLock.set(infoHash, { state: 'FAILED', error: error });
-                    rejectLock(error);
-                    // Keep the failure lock for 5 min to prevent hammering
+                    // Do NOT reject the lock promise – no one is waiting, and it would crash
                     setTimeout(() => processingLock.delete(infoHash), 300000);
                     throw error;
                 }

@@ -79,7 +79,8 @@ async function resolveDownloadUrl(torrentInfo, type, season, episode) {
     }
 }
 
-// ================== API SERVER ==================
+
+// ================== API SERVER (v2.9.14) ==================
 async function startApiServer() {
     const app = express();
     app.use(cors());
@@ -88,9 +89,16 @@ async function startApiServer() {
         const { type, id, infoHash } = req.params;
         const [imdbId, season, episode] = id.split(':');
 
+        // ── Create an AbortController that will fire when the client disconnects ──
+        const abortController = new AbortController();
+        req.on('close', () => {
+            if (!res.writableEnded) {
+                abortController.abort();
+            }
+        });
+
         try {
             let torrentInfo;
-            let downloadUrl = null;   // will be set if we already have it cached
             const lockEntry = processingLock.get(infoHash);
 
             // 1. Handle existing lock
@@ -98,13 +106,10 @@ async function startApiServer() {
                 switch (lockEntry.state) {
                     case 'COMPLETED':
                         logger.info(`[API] Lock hit for ${infoHash}. Serving completed result.`);
-                        // If a download URL was already resolved, use it directly
                         if (lockEntry.downloadUrl) {
                             return res.redirect(lockEntry.downloadUrl);
                         }
-                        // Otherwise fall through to resolve the URL from the stored torrentInfo
                         torrentInfo = lockEntry.data;
-                        // After resolving, we'll cache the URL (handled later)
                         break;
                     case 'PROCESSING':
                         logger.warn(`[API] Request for ${infoHash} is already processing. Awaiting result...`);
@@ -194,6 +199,9 @@ async function startApiServer() {
                                 let readyForSelection = false;
                                 const maxPreChecks = 10;
                                 for (let i = 0; i < maxPreChecks; i++) {
+                                    if (abortController.signal.aborted) {
+                                        throw new DOMException('Aborted', 'AbortError');
+                                    }
                                     await sleep(2000);
                                     let info;
                                     try {
@@ -228,7 +236,8 @@ async function startApiServer() {
 
                         const readyTorrent = await pollTorrentUntilReady(
                             torrentId,
-                            (id) => debrid.getTorrentInfo(id)
+                            (id) => debrid.getTorrentInfo(id),
+                            { signal: abortController.signal }   // ✅ aborts when client disconnects
                         );
 
                         const language = PTT.parse(readyTorrent.filename).languages?.[0] || 'en';
@@ -240,10 +249,16 @@ async function startApiServer() {
                             [infoHash, imdbId, type, DEBRID_PROVIDER, readyTorrent, language, getQuality(readyTorrent.filename), readyTorrent.seeders]
                         );
 
-                        // ✅ Resolve the download URL immediately and store it
+                        // Resolve download URL and return both
                         const url = await resolveDownloadUrl(readyTorrent, type, season, episode);
                         return { torrentInfo: readyTorrent, downloadUrl: url };
                     } catch (error) {
+                        // If the client disconnected, just stop silently – no cleanup, no lock update
+                        if (error instanceof DOMException && error.name === 'AbortError') {
+                            logger.info(`[API] Client disconnected for ${infoHash}. Stopping debrid process.`);
+                            return { aborted: true };
+                        }
+
                         const errMsg = error.message || '';
                         const statusCode = error.response?.status;
                         const isTerminal = errMsg.includes('magnet_error') ||
@@ -273,7 +288,11 @@ async function startApiServer() {
                 })();
 
                 try {
-                    const result = await processPromise;   // { torrentInfo, downloadUrl }
+                    const result = await processPromise;
+                    if (result?.aborted) {
+                        processingLock.delete(infoHash);
+                        return res.status(499).send('Client closed request');
+                    }
                     processingLock.set(infoHash, {
                         state: 'COMPLETED',
                         data: result.torrentInfo,
@@ -283,6 +302,10 @@ async function startApiServer() {
                     setTimeout(() => processingLock.delete(infoHash), 30000);
                     return res.redirect(result.downloadUrl);
                 } catch (error) {
+                    if (error instanceof DOMException && error.name === 'AbortError') {
+                        processingLock.delete(infoHash);
+                        return res.status(499).send('Client closed request');
+                    }
                     logger.error(`[API] Processing failed for ${infoHash}: ${error.message}`);
                     processingLock.set(infoHash, { state: 'FAILED', error: error });
                     setTimeout(() => processingLock.delete(infoHash), 300000);
@@ -293,7 +316,6 @@ async function startApiServer() {
             // 4. If we have torrentInfo but no downloadUrl yet (from DB cache or in‑memory cache)
             if (torrentInfo) {
                 const url = await resolveDownloadUrl(torrentInfo, type, season, episode);
-                // If the lock still exists (should be COMPLETED), update it with the URL
                 const currentLock = processingLock.get(infoHash);
                 if (currentLock && currentLock.state === 'COMPLETED') {
                     currentLock.downloadUrl = url;
@@ -303,6 +325,9 @@ async function startApiServer() {
                 res.status(404).send('Torrent not available via debrid.');
             }
         } catch (error) {
+            if (error instanceof DOMException && error.name === 'AbortError') {
+                return res.status(499).send('Client closed request');
+            }
             logger.error(`[API] Final error processing ${infoHash}: ${error.message}`);
             res.status(500).send(`Error: ${error.message}. Please try another stream.`);
         }

@@ -1,5 +1,5 @@
 // File: index.js
-// Version: 2.9.9 – Safe lock promises (no unhandled rejections), all v2.9.8 improvements
+// Version: 2.9.10 – Terminal detection for ResourceNotFoundError
 
 import express from 'express';
 import cors from 'cors';
@@ -93,11 +93,9 @@ async function startApiServer() {
                     resolveLock = res;
                     rejectLock = rej;
                 });
-                // Prevent unhandled rejection – the promise is only used internally
                 lockPromise.catch(() => {});
                 processingLock.set(infoHash, { state: 'PROCESSING', promise: lockPromise });
 
-                // Wrap the entire process so we can resolve/reject the lock
                 const processPromise = (async () => {
                     let torrentId = null;
                     try {
@@ -126,10 +124,8 @@ async function startApiServer() {
                             if (!addResult) throw new Error('Failed to add magnet to debrid.');
                             torrentId = addResult.id;
 
-                            // 🚀 FAST‑PATH: if the torrent was already cached (TorBox), skip the pre‑selection loop
                             const isCached = addResult.cached === true;
                             if (!isCached) {
-                                // Standard pre‑selection loop for non‑cached torrents
                                 logger.info(`[API] Torrent added (ID: ${torrentId}). Waiting for metadata...`);
                                 let readyForSelection = false;
                                 const maxPreChecks = 10;
@@ -149,7 +145,6 @@ async function startApiServer() {
                                     throw new Error('Timed out waiting for debrid to convert magnet metadata.');
                                 }
 
-                                // Select all files
                                 const freshInfo = await debrid.getTorrentInfo(torrentId);
                                 if (freshInfo && freshInfo.status === 'waiting_files_selection') {
                                     const fileIds = freshInfo.files.map((_, idx) => idx);
@@ -178,16 +173,16 @@ async function startApiServer() {
 
                         return readyTorrent;
                     } catch (error) {
-                        // Classify error
                         const errMsg = error.message || '';
                         const statusCode = error.response?.status;
                         const isTerminal = errMsg.includes('magnet_error') ||
                                            errMsg.includes('virus') ||
                                            errMsg.includes('rejected') ||
-                                           statusCode === 451;
+                                           statusCode === 451 ||
+                                           error.name === 'ResourceNotFoundError';   // ✅ terminal
+
                         const isTimeout = errMsg.includes('timed out');
 
-                        // Cleanup
                         if (torrentId) {
                             if (isTerminal) {
                                 logger.warn(`[API] Terminal failure for ${torrentId}: ${errMsg}. Deleting torrent.`);
@@ -207,7 +202,6 @@ async function startApiServer() {
                     }
                 })();
 
-                // 4. Await result and update the lock
                 try {
                     torrentInfo = await processPromise;
                     processingLock.set(infoHash, { state: 'COMPLETED', data: torrentInfo });
@@ -216,13 +210,11 @@ async function startApiServer() {
                 } catch (error) {
                     logger.error(`[API] Processing failed for ${infoHash}: ${error.message}`);
                     processingLock.set(infoHash, { state: 'FAILED', error: error });
-                    // Do NOT reject the lock promise – no one is waiting, and it would crash
                     setTimeout(() => processingLock.delete(infoHash), 300000);
                     throw error;
                 }
             }
 
-            // 5. Play the resolved torrent info
             if (torrentInfo) {
                 if (type === 'series') {
                     await playFromReadyTorrent(res, torrentInfo, season, episode);
@@ -261,14 +253,11 @@ async function playFromReadyTorrent(res, readyTorrent, season, episode) {
         throw new Error(`Could not find S${season}E${episode} in the torrent's selected file list.`);
     }
 
-    // Provider‑agnostic download
     if (typeof debrid.getDownloadLinkForFile === 'function') {
-        // TorBox – direct file ID
         const downloadUrl = await debrid.getDownloadLinkForFile(readyTorrent.id, fileToPlay.id);
         if (!downloadUrl) throw new Error('Failed to obtain download link from TorBox.');
         res.redirect(downloadUrl);
     } else {
-        // Real‑Debrid – unrestrict link via index
         const fileIndexInSelected = selectedFiles.indexOf(fileToPlay);
         const linkToUnrestrict = readyTorrent.links[fileIndexInSelected];
         if (!linkToUnrestrict) throw new Error('No link available for the selected file.');
@@ -429,7 +418,7 @@ async function startAddonServer() {
                                 logger.debug(`[ADDON] Stored pre-resolved info for ${s.infoHash} (torrentId=${cs.torrent_id})`);
                             }
                         } else {
-                            s.isCached = false;   // will still get a debrid URL (⌛)
+                            s.isCached = false;
                         }
                     }
                     const cachedCount = sortedStreams.filter(s => s.isCached).length;
@@ -440,7 +429,6 @@ async function startAddonServer() {
                 }
             }
         }
-        // Real‑Debrid: no checkCached; isCached flag comes from DB cache (set by matcher)
 
         // ========== Fix missing fileIndex for P2P movies (only when P2P mode) ==========
         if (!debrid.isEnabled) {
@@ -475,10 +463,8 @@ async function startAddonServer() {
         // ========== Build final stream list ==========
         const streams = [];
         if (debrid.isEnabled) {
-            // Debrid only – every matched torrent gets a debrid stream URL
             streams.push(...mapToDebridStreams(sortedStreams));
         } else {
-            // Pure P2P mode
             streams.push(...mapToP2PStreams(sortedStreams));
         }
 

@@ -1,5 +1,5 @@
 // File: src/debrid/realdebrid.js
-// Version: 2.3 – getTorrentInfo returns null on transient 404 (matching original)
+// Version: 2.3 – getTorrentInfo returns null on transient 404
 
 import axios from 'axios';
 import { REALDEBRID_API_KEY } from '../../config.js';
@@ -51,16 +51,16 @@ const realdebrid = {
     return data;
   },
 
-  // ✅ Returns null on 404 (transient during processing), throws on other errors
+  // Returns null on 404 – caller must handle retry
   async getTorrentInfo(id) {
     try {
       return await request('get', `/torrents/info/${id}`);
     } catch (error) {
       if (error instanceof ResourceNotFoundError) {
         logger.warn(`[RD] getTorrentInfo returned 404 for ${id} – torrent may still be processing.`);
-        return null;   // ← matches original behavior: caller will retry
+        return null;
       }
-      throw error;     // ← other errors still propagate
+      throw error;
     }
   },
 
@@ -75,7 +75,6 @@ const realdebrid = {
         logger.info(`Real-Debrid files already selected for ${id}`);
         return;
       }
-      // For selectFiles, 404 with error_code 7 means the torrent truly expired
       throw error;
     }
   },
@@ -88,7 +87,7 @@ const realdebrid = {
   async addAndSelect(magnet) {
     const torrent = await this.addMagnet(magnet);
     const info = await this.getTorrentInfo(torrent.id);
-    if (!info) return null;   // torrent not ready yet
+    if (!info) return null;
     const videoFiles = (info.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv|flv|webm)$/i.test(f.path || f.name));
     if (videoFiles.length) {
       const largest = videoFiles.reduce((a, b) => (a.size > b.size ? a : b));

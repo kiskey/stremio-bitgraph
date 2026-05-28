@@ -1,5 +1,5 @@
 // File: src/debrid/realdebrid.js
-// Version: 2.1 – Use logger (not log)
+// Version: 2.2 – Verified API handling: encodeURIComponent, timeout, 202/404 handling
 
 import axios from 'axios';
 import { REALDEBRID_API_KEY } from '../../config.js';
@@ -22,6 +22,7 @@ function getAxios() {
     axiosInstance = axios.create({
       baseURL: BASE_URL,
       headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 15000,    // added timeout
     });
   }
   return axiosInstance;
@@ -34,6 +35,10 @@ async function request(method, path, data = null) {
     return response.data;
   } catch (error) {
     if (error.response && error.response.status === 404) {
+      // For selectFiles, RD may return 404 with error_code 7 (unknown_ressource)
+      if (error.response.data?.error_code === 7) {
+        throw new ResourceNotFoundError(`Torrent ID not found (error_code 7)`);
+      }
       throw new ResourceNotFoundError();
     }
     throw error;
@@ -44,9 +49,9 @@ const realdebrid = {
   isEnabled: !!apiKey,
 
   async addMagnet(magnet) {
-    const form = new URLSearchParams();
-    form.append('magnet', magnet);
-    const data = await request('post', '/torrents/addMagnet', form.toString());
+    // Use encodeURIComponent as in the verified reference
+    const body = `magnet=${encodeURIComponent(magnet)}`;
+    const data = await request('post', '/torrents/addMagnet', body);
     logger.info(`Real-Debrid magnet added: ${data.id}`);
     return data;
   },
@@ -56,16 +61,25 @@ const realdebrid = {
   },
 
   async selectFiles(id, fileIds) {
-    const form = new URLSearchParams();
-    form.append('files', fileIds.join(','));
-    await request('post', `/torrents/selectFiles/${id}`, form.toString());
-    logger.info(`Real-Debrid files selected for ${id}`);
+    // fileIds can be 'all' or an array
+    const filesParam = fileIds === 'all' ? 'all' : fileIds.join(',');
+    const body = `files=${filesParam}`;
+    try {
+      await request('post', `/torrents/selectFiles/${id}`, body);
+      logger.info(`Real-Debrid files selected for ${id}`);
+    } catch (error) {
+      if (error.response && error.response.status === 202) {
+        // Files already selected – treat as success
+        logger.info(`Real-Debrid files already selected for ${id}`);
+        return;
+      }
+      throw error;
+    }
   },
 
   async unrestrictLink(link) {
-    const form = new URLSearchParams();
-    form.append('link', link);
-    return request('post', '/unrestrict/link', form.toString());
+    const body = `link=${encodeURIComponent(link)}`;
+    return request('post', '/unrestrict/link', body);
   },
 
   async addAndSelect(magnet) {

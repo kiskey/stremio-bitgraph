@@ -1,5 +1,5 @@
 // File: src/debrid/realdebrid.js
-// Version: 2.1 – Use logger (not log)
+// Version: 2.3 – Returns null on transient 404; uses real file IDs
 
 import axios from 'axios';
 import { REALDEBRID_API_KEY } from '../../config.js';
@@ -22,71 +22,63 @@ function getAxios() {
     axiosInstance = axios.create({
       baseURL: BASE_URL,
       headers: { Authorization: `Bearer ${apiKey}` },
+      timeout: 15000,
     });
   }
   return axiosInstance;
-}
-
-async function request(method, path, data = null) {
-  const client = getAxios();
-  try {
-    const response = await client({ method, url: path, data });
-    return response.data;
-  } catch (error) {
-    if (error.response && error.response.status === 404) {
-      throw new ResourceNotFoundError();
-    }
-    throw error;
-  }
 }
 
 const realdebrid = {
   isEnabled: !!apiKey,
 
   async addMagnet(magnet) {
-    const form = new URLSearchParams();
-    form.append('magnet', magnet);
-    const data = await request('post', '/torrents/addMagnet', form.toString());
+    const body = `magnet=${encodeURIComponent(magnet)}`;
+    const { data } = await getAxios().post('/torrents/addMagnet', body);
     logger.info(`Real-Debrid magnet added: ${data.id}`);
     return data;
   },
 
+  // Returns null on 404 so callers can retry
   async getTorrentInfo(id) {
-    return request('get', `/torrents/info/${id}`);
+    try {
+      const { data } = await getAxios().get(`/torrents/info/${id}`);
+      return data;
+    } catch (error) {
+      if (error.response?.status === 404) {
+        logger.warn(`[RD] getTorrentInfo 404 for ${id} – still processing?`);
+        return null;
+      }
+      throw error;
+    }
   },
 
   async selectFiles(id, fileIds) {
-    const form = new URLSearchParams();
-    form.append('files', fileIds.join(','));
-    await request('post', `/torrents/selectFiles/${id}`, form.toString());
-    logger.info(`Real-Debrid files selected for ${id}`);
+    const param = fileIds === 'all' ? 'all' : fileIds.join(',');
+    try {
+      await getAxios().post(`/torrents/selectFiles/${id}`, `files=${param}`);
+      logger.info(`Real-Debrid files selected for ${id}`);
+    } catch (error) {
+      if (error.response?.status === 202) {
+        logger.info(`Files already selected for ${id}`);
+        return;
+      }
+      throw error;
+    }
   },
 
   async unrestrictLink(link) {
-    const form = new URLSearchParams();
-    form.append('link', link);
-    return request('post', '/unrestrict/link', form.toString());
-  },
-
-  async addAndSelect(magnet) {
-    const torrent = await this.addMagnet(magnet);
-    const info = await this.getTorrentInfo(torrent.id);
-    const videoFiles = (info.files || []).filter(f => /\.(mkv|mp4|avi|mov|wmv|flv|webm)$/i.test(f.path || f.name));
-    if (videoFiles.length) {
-      const largest = videoFiles.reduce((a, b) => (a.size > b.size ? a : b));
-      const fileIdx = info.files.indexOf(largest);
-      await this.selectFiles(torrent.id, [fileIdx]);
-    }
-    return this.getTorrentInfo(torrent.id);
+    const { data } = await getAxios().post('/unrestrict/link', `link=${encodeURIComponent(link)}`);
+    return data;
   },
 
   async deleteTorrent(id) {
-    await request('delete', `/torrents/delete/${id}`);
+    await getAxios().delete(`/torrents/delete/${id}`);
     logger.info(`Real-Debrid torrent deleted: ${id}`);
   },
 
   async getTorrents() {
-    return request('get', '/torrents');
+    const { data } = await getAxios().get('/torrents');
+    return data;
   },
 
   ResourceNotFoundError,
